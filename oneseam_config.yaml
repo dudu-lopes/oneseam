@@ -1,0 +1,28 @@
+# Oneseam Enterprise Configuration
+# Version: 2.0
+
+# Node settings
+node_port: 5001
+broadcast_port: 5002
+api_port: 8000
+storage_dir: oneseam_storage
+
+# Quorum: k-of-n shards required for reconstruction
+quorum_k: 2
+quorum_n: 3
+
+# Transport mode: ON_GRID | OFF_GRID | HYBRID
+# - ON_GRID: Traditional internet
+# - OFF_GRID: Mesh networks (BATMAN, OLSR)
+# - HYBRID: Both
+transport_mode: HYBRID
+
+# Data sovereignty (GDPR, LGPD compliance)
+region: ""
+country_code: ""
+
+# Blind Relay (Repasse Cego)
+blind_relay_enabled: true
+max_relay_hops: 10
+served_destinations: []  # ex: [BANK_ALPHA, BANK_BETA]
+blind_relay_flood: false  # Flood to all neighbors for max resilience
