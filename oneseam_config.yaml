@@ -5,6 +5,7 @@
 node_port: 5001
 broadcast_port: 5002
 api_port: 8000
+api_bind: "127.0.0.1"
 storage_dir: oneseam_storage
 
 # Quorum: k-of-n shards required for reconstruction
@@ -26,3 +27,41 @@ blind_relay_enabled: true
 max_relay_hops: 10
 served_destinations: []  # ex: [BANK_ALPHA, BANK_BETA]
 blind_relay_flood: false  # Flood to all neighbors for max resilience
+
+# Security (REST API)
+tls_enabled: false
+tls_cert_path: ""
+tls_key_path: ""
+mtls_ca_path: ""
+mtls_allowed_cns: []  # Optional allowlist of client CNs
+
+jwt_issuer: ""
+jwt_audience: ""
+jwt_public_keys: []  # List of PEM strings or file paths
+jwt_algorithms: ["RS256", "ES256"]
+allow_legacy_api_keys: true
+api_max_payload_bytes: 1048576
+rate_limit_rps: 5
+rate_limit_burst: 10
+idempotency_ttl_seconds: 300
+idempotency_max_entries: 10000
+
+# Security (P2P)
+p2p_tls_enabled: false
+p2p_tls_cert_path: ""
+p2p_tls_key_path: ""
+p2p_mtls_ca_path: ""
+p2p_mtls_allowed_cns: []
+p2p_retries: 3
+p2p_backoff_base: 0.2
+
+# Key management
+key_store_path: "oneseam_keys.json"
+signing_key_id: "node_signing"
+
+# Observability
+log_file: ""         # empty = stdout
+log_json: true
+log_level: "INFO"    # DEBUG | INFO | WARN | ERROR
+neighbor_ttl_seconds: 60
+metrics_enabled: true

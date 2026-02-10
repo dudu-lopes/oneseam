@@ -75,6 +75,19 @@ transport_mode: HYBRID   # ON_GRID | OFF_GRID | HYBRID
 region: "EU"         # Data sovereignty region
 ```
 
+### Security (REST API)
+```yaml
+tls_enabled: true
+tls_cert_path: "/path/to/cert.pem"
+tls_key_path: "/path/to/key.pem"
+mtls_ca_path: "/path/to/ca.pem"   # optional
+
+jwt_issuer: "oneseam"
+jwt_audience: "oneseam-api"
+jwt_public_keys:
+  - "/path/to/jwt_public_key.pem"
+```
+
 ## Usage
 
 ### CLI Mode
@@ -93,7 +106,7 @@ python oneseam_enterprise.py api
 - `POST /v1/instructions/<id>/release` – Generate Access Release Token (ART)
 - `GET /v1/billing` – Billing report
 
-**Authentication:** `X-API-Key` header
+**Authentication:** `Authorization: Bearer <JWT>` (default). `X-API-Key` is deprecated.
 
 ## Business Model
 
@@ -105,6 +118,7 @@ Enterprise-first: software licensing, support, and per-instruction volume billin
 - `pycryptodome` – Shamir Secret Sharing (zero-knowledge sharding)
 - `flask` – REST API
 - `pyyaml` – Configuration
+- `PyJWT` ? JWT authentication
 
 ## License
 
