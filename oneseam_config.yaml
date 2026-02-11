@@ -7,6 +7,9 @@ broadcast_port: 5002
 api_port: 8000
 api_bind: "127.0.0.1"
 storage_dir: oneseam_storage
+db_backend: "sqlite"   # sqlite | postgres
+db_path: "oneseam.db"
+db_dsn: ""             # postgres DSN if backend=postgres
 
 # Quorum: k-of-n shards required for reconstruction
 quorum_k: 2
@@ -27,6 +30,10 @@ blind_relay_enabled: true
 max_relay_hops: 10
 served_destinations: []  # ex: [BANK_ALPHA, BANK_BETA]
 blind_relay_flood: false  # Flood to all neighbors for max resilience
+
+# Bootstrap / NAT
+seed_nodes: []  # ex: ["1.2.3.4:5001", "seed.example.com:5001"]
+upnp_enabled: false
 
 # Security (REST API)
 tls_enabled: false
@@ -52,8 +59,15 @@ p2p_tls_cert_path: ""
 p2p_tls_key_path: ""
 p2p_mtls_ca_path: ""
 p2p_mtls_allowed_cns: []
+p2p_mtls_required: true
 p2p_retries: 3
 p2p_backoff_base: 0.2
+
+# Shard signing
+shard_signature_required: true
+shard_signing_private_key: "shard_signing_priv.pem"
+shard_signing_public_key: "shard_signing_pub.pem"
+trusted_node_pubkeys: {}  # {NODE_ID: "-----BEGIN PUBLIC KEY-----..."}
 
 # Key management
 key_store_path: "oneseam_keys.json"

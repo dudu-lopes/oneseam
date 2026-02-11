@@ -19,6 +19,8 @@ No custody of funds. Messages only. Compliance-native.
 import os
 import sys
 import threading
+import asyncio
+import sqlite3
 import socket
 import json
 import time
@@ -32,7 +34,7 @@ import hashlib
 import uuid as uuid_lib
 from hashlib import sha256
 from getpass import getpass
-from typing import List, Optional, Dict, Tuple, Any
+from typing import List, Optional, Dict, Tuple, Any, Literal
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -55,6 +57,8 @@ try:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives import serialization
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
@@ -67,6 +71,90 @@ try:
     JWT_AVAILABLE = True
 except ImportError:
     JWT_AVAILABLE = False
+
+# Async HTTP
+try:
+    import aiohttp
+    from aiohttp import web
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+
+# Pydantic validation
+try:
+    from pydantic import BaseModel, ValidationError, Field
+    from pydantic import ConfigDict
+    PYDANTIC_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AVAILABLE = False
+
+if PYDANTIC_AVAILABLE:
+    class PaymentObligationRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        amount: float
+        currency: str = 'USD'
+        creditor: str
+        debtor: str
+        due_date: Optional[int] = None
+        terms: Optional[str] = None
+        reference: Optional[str] = None
+        interest_rate: Optional[float] = None
+        jurisdiction: Optional[str] = None
+    
+    class InstructionRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        payload: str
+        destination: str
+        encryption_key: Optional[str] = None
+        jurisdiction: Optional[str] = None
+        data_region: Optional[str] = None
+        compliance_frameworks: Optional[List[str]] = None
+    
+    class P2PStoreShard(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['STORE_SHARD']
+        shard_name: str
+        shard_data: str
+        shard_dict: Optional[Dict[str, Any]] = None
+        instruction_id: Optional[str] = None
+        destination: Optional[str] = ''
+        data_region: Optional[str] = ''
+        relay_hops: int = 0
+        signature: Optional[str] = ''
+        sender_id: Optional[str] = ''
+    
+    class P2PStoreManifest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['STORE_MANIFEST']
+        instruction_id: str
+        manifest: Dict[str, Any]
+    
+    class P2PFetchShard(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['FETCH_SHARD']
+        shard_name: str
+    
+    class P2PFetchManifest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['FETCH_MANIFEST']
+        instruction_id: str
+    
+    class P2PHealth(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['HEALTH_CHECK']
+    
+    class P2PHandshake(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['HANDSHAKE']
+        node_id: str
+        node_port: int
+        capabilities: List[str]
+        version: str
+        transport_mode: str
+        region: Optional[str] = ''
+        country_code: Optional[str] = ''
+        served_destinations: List[str] = Field(default_factory=list)
+        node_signing_pub: Optional[str] = ''
 
 def derive_key_from_password(password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
     """Derive AES-256 key from password using PBKDF2HMAC"""
@@ -594,6 +682,9 @@ NODE_PORT = _config('node_port', 5001)
 BROADCAST_PORT = _config('broadcast_port', 5002)
 API_PORT = _config('api_port', 8000)
 API_BIND = _config('api_bind', '127.0.0.1')
+DB_BACKEND = _config('db_backend', 'sqlite')
+DB_PATH = _config('db_path', 'oneseam.db')
+DB_DSN = _config('db_dsn', '')
 TLS_ENABLED = _config('tls_enabled', False)
 TLS_CERT_PATH = _config('tls_cert_path', '')
 TLS_KEY_PATH = _config('tls_key_path', '')
@@ -614,14 +705,18 @@ P2P_TLS_CERT_PATH = _config('p2p_tls_cert_path', '')
 P2P_TLS_KEY_PATH = _config('p2p_tls_key_path', '')
 P2P_MTLS_CA_PATH = _config('p2p_mtls_ca_path', '')
 P2P_MTLS_ALLOWED_CNS = _config('p2p_mtls_allowed_cns', []) or []
+P2P_MTLS_REQUIRED = _config('p2p_mtls_required', True)
 P2P_RETRIES = _config('p2p_retries', 3)
 P2P_BACKOFF_BASE = _config('p2p_backoff_base', 0.2)
+SEED_NODES = _config('seed_nodes', []) or []
+UPNP_ENABLED = _config('upnp_enabled', False)
+SHARD_SIGNATURE_REQUIRED = _config('shard_signature_required', True)
+SHARD_SIGNING_PRIVATE_KEY = _config('shard_signing_private_key', 'shard_signing_priv.pem')
+SHARD_SIGNING_PUBLIC_KEY = _config('shard_signing_public_key', 'shard_signing_pub.pem')
+TRUSTED_NODE_PUBKEYS = _config('trusted_node_pubkeys', {}) or {}
 BROADCAST_ADDR = _config('broadcast_addr', '<broadcast>')
 BUFFER_SIZE = 1024 * 1024  # 1MB
-STORAGE_DIR = _config('storage_dir', 'oneseam_storage')
 NODE_ID_FILE = 'node_id.txt'
-METERING_LOG = 'metering_events.jsonl'
-AUDIT_LOG = _config('audit_log', 'audit_events.jsonl')
 LOG_FILE = _config('log_file', '')
 LOG_JSON = _config('log_json', True)
 LOG_LEVEL = _config('log_level', 'INFO')
@@ -648,6 +743,19 @@ node_id = None
 neighbors = {}
 neighbors_lock = threading.Lock()
 QUIET_MODE = True  # Set to True to suppress RELAY logs
+ASYNC_LOOP = None
+RELAY_QUEUE = asyncio.Queue()
+
+def run_async(coro):
+    global ASYNC_LOOP
+    try:
+        loop = ASYNC_LOOP
+        if loop and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            return fut.result()
+    except Exception:
+        pass
+    return asyncio.run(coro)
 
 # Enterprise API keys (in production: secure storage)
 def _load_api_keys() -> Dict[str, Dict[str, str]]:
@@ -668,6 +776,375 @@ def _load_api_keys() -> Dict[str, Dict[str, str]]:
 
 API_KEYS = _load_api_keys()
 
+# ===== STORAGE (DATABASE) =====
+class StorageDB:
+    def __init__(self, backend: str, path: str, dsn: str):
+        self.backend = backend
+        self.path = path
+        self.dsn = dsn
+        self.lock = threading.Lock()
+        self.conn = None
+    
+    def connect(self):
+        if self.conn:
+            return
+        if self.backend == 'sqlite':
+            self.conn = sqlite3.connect(self.path, check_same_thread=False)
+            self.conn.execute('PRAGMA journal_mode=WAL;')
+            self.conn.execute('PRAGMA synchronous=FULL;')
+            self.conn.execute('PRAGMA foreign_keys=ON;')
+        elif self.backend == 'postgres':
+            try:
+                import psycopg2
+            except ImportError:
+                raise RuntimeError('psycopg2 required for postgres backend')
+            self.conn = psycopg2.connect(self.dsn)
+            self.conn.autocommit = True
+        else:
+            raise RuntimeError(f'Unsupported db_backend: {self.backend}')
+    
+    def init_schema(self):
+        with self.lock:
+            cur = self.conn.cursor()
+            if self.backend == 'sqlite':
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS shards (
+                    shard_name TEXT PRIMARY KEY,
+                    instruction_id TEXT,
+                    shard_index INTEGER,
+                    replica INTEGER,
+                    data TEXT,
+                    share TEXT,
+                    signature TEXT,
+                    sender_id TEXT,
+                    destination TEXT,
+                    data_region TEXT,
+                    relay_hops INTEGER,
+                    received_at INTEGER,
+                    created_at INTEGER
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_shards_instruction ON shards(instruction_id)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS manifests (
+                    instruction_id TEXT PRIMARY KEY,
+                    manifest_json TEXT NOT NULL,
+                    created_at INTEGER
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    event_id TEXT PRIMARY KEY,
+                    timestamp INTEGER,
+                    actor TEXT,
+                    node_id TEXT,
+                    instruction_id TEXT,
+                    event_type TEXT,
+                    details_json TEXT,
+                    request_id TEXT,
+                    prev_hash TEXT,
+                    hash TEXT,
+                    signature TEXT,
+                    key_id TEXT,
+                    key_version INTEGER
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS metering_events (
+                    instruction_id TEXT,
+                    client_id TEXT,
+                    timestamp INTEGER,
+                    node_id TEXT,
+                    event_type TEXT,
+                    billable INTEGER,
+                    price_usd REAL,
+                    access_release_token TEXT,
+                    signature TEXT
+                )
+                """)
+                self.conn.commit()
+            else:
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS shards (
+                    shard_name TEXT PRIMARY KEY,
+                    instruction_id TEXT,
+                    shard_index INTEGER,
+                    replica INTEGER,
+                    data TEXT,
+                    share TEXT,
+                    signature TEXT,
+                    sender_id TEXT,
+                    destination TEXT,
+                    data_region TEXT,
+                    relay_hops INTEGER,
+                    received_at INTEGER,
+                    created_at INTEGER
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_shards_instruction ON shards(instruction_id)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS manifests (
+                    instruction_id TEXT PRIMARY KEY,
+                    manifest_json TEXT NOT NULL,
+                    created_at INTEGER
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    event_id TEXT PRIMARY KEY,
+                    timestamp INTEGER,
+                    actor TEXT,
+                    node_id TEXT,
+                    instruction_id TEXT,
+                    event_type TEXT,
+                    details_json TEXT,
+                    request_id TEXT,
+                    prev_hash TEXT,
+                    hash TEXT,
+                    signature TEXT,
+                    key_id TEXT,
+                    key_version INTEGER
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS metering_events (
+                    instruction_id TEXT,
+                    client_id TEXT,
+                    timestamp INTEGER,
+                    node_id TEXT,
+                    event_type TEXT,
+                    billable INTEGER,
+                    price_usd REAL,
+                    access_release_token TEXT,
+                    signature TEXT
+                )
+                """)
+    
+    def _execute(self, query: str, params: Tuple = ()):
+        with self.lock:
+            cur = self.conn.cursor()
+            cur.execute(query, params)
+            if self.backend == 'sqlite':
+                self.conn.commit()
+            return cur
+    
+    def store_shard(self, shard_name: str, instruction_id: str, shard_index: int, replica: int,
+                    data: str, share: Optional[str], signature: Optional[str], sender_id: str,
+                    destination: str, data_region: str, relay_hops: int, received_at: int):
+        created_at = int(time.time())
+        if self.backend == 'sqlite':
+            self._execute("""
+                INSERT OR REPLACE INTO shards
+                (shard_name, instruction_id, shard_index, replica, data, share, signature, sender_id,
+                 destination, data_region, relay_hops, received_at, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (shard_name, instruction_id, shard_index, replica, data, share, signature, sender_id,
+                  destination, data_region, relay_hops, received_at, created_at))
+        else:
+            self._execute("""
+                INSERT INTO shards
+                (shard_name, instruction_id, shard_index, replica, data, share, signature, sender_id,
+                 destination, data_region, relay_hops, received_at, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (shard_name) DO UPDATE SET
+                  instruction_id=EXCLUDED.instruction_id,
+                  shard_index=EXCLUDED.shard_index,
+                  replica=EXCLUDED.replica,
+                  data=EXCLUDED.data,
+                  share=EXCLUDED.share,
+                  signature=EXCLUDED.signature,
+                  sender_id=EXCLUDED.sender_id,
+                  destination=EXCLUDED.destination,
+                  data_region=EXCLUDED.data_region,
+                  relay_hops=EXCLUDED.relay_hops,
+                  received_at=EXCLUDED.received_at,
+                  created_at=EXCLUDED.created_at
+            """, (shard_name, instruction_id, shard_index, replica, data, share, signature, sender_id,
+                  destination, data_region, relay_hops, received_at, created_at))
+    
+    def get_shard(self, shard_name: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("SELECT shard_name, instruction_id, shard_index, replica, data, share, signature, sender_id, destination, data_region, relay_hops, received_at FROM shards WHERE shard_name=?"
+                            if self.backend == 'sqlite'
+                            else "SELECT shard_name, instruction_id, shard_index, replica, data, share, signature, sender_id, destination, data_region, relay_hops, received_at FROM shards WHERE shard_name=%s",
+                            (shard_name,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'shard_name': row[0],
+            'instruction_id': row[1],
+            'index': row[2],
+            'replica': row[3],
+            'data': row[4],
+            'share': row[5],
+            'signature': row[6],
+            'sender_id': row[7],
+            'destination': row[8],
+            'data_region': row[9],
+            'relay_hops': row[10],
+            'received_at': row[11]
+        }
+    
+    def list_shards(self) -> List[str]:
+        cur = self._execute("SELECT shard_name FROM shards")
+        return [r[0] for r in cur.fetchall()]
+    
+    def list_shards_by_instruction(self, instruction_id: str) -> List[Dict[str, Any]]:
+        cur = self._execute("SELECT shard_name, shard_index, replica FROM shards WHERE instruction_id=?"
+                            if self.backend == 'sqlite'
+                            else "SELECT shard_name, shard_index, replica FROM shards WHERE instruction_id=%s",
+                            (instruction_id,))
+        return [{'shard_name': r[0], 'index': r[1], 'replica': r[2]} for r in cur.fetchall()]
+    
+    def store_manifest(self, instruction_id: str, manifest: Dict[str, Any]):
+        manifest_json = json.dumps(manifest)
+        created_at = int(time.time())
+        if self.backend == 'sqlite':
+            self._execute("INSERT OR REPLACE INTO manifests (instruction_id, manifest_json, created_at) VALUES (?,?,?)",
+                          (instruction_id, manifest_json, created_at))
+        else:
+            self._execute("""INSERT INTO manifests (instruction_id, manifest_json, created_at)
+                             VALUES (%s,%s,%s)
+                             ON CONFLICT (instruction_id) DO UPDATE SET manifest_json=EXCLUDED.manifest_json, created_at=EXCLUDED.created_at""",
+                          (instruction_id, manifest_json, created_at))
+    
+    def get_manifest(self, instruction_id: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("SELECT manifest_json FROM manifests WHERE instruction_id=?"
+                            if self.backend == 'sqlite'
+                            else "SELECT manifest_json FROM manifests WHERE instruction_id=%s",
+                            (instruction_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return json.loads(row[0])
+    
+    def list_manifests(self) -> List[Dict[str, Any]]:
+        cur = self._execute("SELECT manifest_json FROM manifests")
+        return [json.loads(r[0]) for r in cur.fetchall()]
+    
+    def record_audit(self, event: Dict[str, Any]):
+        self._execute("""INSERT OR REPLACE INTO audit_log
+            (event_id, timestamp, actor, node_id, instruction_id, event_type, details_json, request_id,
+             prev_hash, hash, signature, key_id, key_version)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+            if self.backend == 'sqlite' else
+            """INSERT INTO audit_log
+            (event_id, timestamp, actor, node_id, instruction_id, event_type, details_json, request_id,
+             prev_hash, hash, signature, key_id, key_version)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (event_id) DO NOTHING""",
+            (event['event_id'], event['timestamp'], event['actor'], event['node_id'],
+             event['instruction_id'], event['event_type'], json.dumps(event.get('details', {})),
+             event.get('request_id', ''), event.get('prev_hash', ''), event.get('hash', ''),
+             event.get('signature', ''), event.get('key_id', ''), event.get('key_version', 0)))
+    
+    def list_audit_events(self) -> List[Dict[str, Any]]:
+        cur = self._execute("SELECT event_id, timestamp, actor, node_id, instruction_id, event_type, details_json, request_id, prev_hash, hash, signature, key_id, key_version FROM audit_log ORDER BY timestamp ASC, event_id ASC")
+        out = []
+        for r in cur.fetchall():
+            out.append({
+                'event_id': r[0],
+                'timestamp': r[1],
+                'actor': r[2],
+                'node_id': r[3],
+                'instruction_id': r[4],
+                'event_type': r[5],
+                'details': json.loads(r[6]) if r[6] else {},
+                'request_id': r[7],
+                'prev_hash': r[8],
+                'hash': r[9],
+                'signature': r[10],
+                'key_id': r[11],
+                'key_version': r[12]
+            })
+        return out
+    
+    def record_metering(self, event: Dict[str, Any]):
+        self._execute("""INSERT INTO metering_events
+            (instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd,
+             access_release_token, signature)
+            VALUES (?,?,?,?,?,?,?,?,?)"""
+            if self.backend == 'sqlite' else
+            """INSERT INTO metering_events
+            (instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd,
+             access_release_token, signature)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (event['instruction_id'], event['client_id'], event['timestamp'], event['node_id'],
+             event['event_type'], 1 if event.get('billable') else 0,
+             event['price_usd'], event.get('access_release_token', ''), event.get('signature', '')))
+    
+    def list_metering_events(self, client_id: str, start: int, end: int) -> List[Dict[str, Any]]:
+        cur = self._execute("SELECT instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd, access_release_token, signature FROM metering_events WHERE client_id=? AND timestamp BETWEEN ? AND ?"
+                            if self.backend == 'sqlite'
+                            else "SELECT instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd, access_release_token, signature FROM metering_events WHERE client_id=%s AND timestamp BETWEEN %s AND %s",
+                            (client_id, start, end))
+        out = []
+        for r in cur.fetchall():
+            out.append({
+                'instruction_id': r[0],
+                'client_id': r[1],
+                'timestamp': r[2],
+                'node_id': r[3],
+                'event_type': r[4],
+                'billable': bool(r[5]),
+                'price_usd': r[6],
+                'access_release_token': r[7],
+                'signature': r[8]
+            })
+        return out
+
+    def list_metering_clients(self) -> List[str]:
+        cur = self._execute("SELECT DISTINCT client_id FROM metering_events")
+        return [r[0] for r in cur.fetchall() if r and r[0]]
+
+    def close(self):
+        try:
+            if self.conn:
+                self.conn.close()
+        except Exception:
+            pass
+
+STORAGE_DB = StorageDB(DB_BACKEND, DB_PATH, DB_DSN)
+
+def store_shard_record(shard_name: str, shard_data: str, shard_dict: Optional[Dict[str, Any]],
+                       relay_meta: Dict[str, Any], signature: Optional[str], sender_id: str):
+    instruction_id = shard_name.split('_shard', 1)[0] if '_shard' in shard_name else ''
+    shard_index = shard_dict.get('index') if shard_dict else None
+    replica = None
+    if '_v' in shard_name:
+        try:
+            replica = int(shard_name.rsplit('_v', 1)[1].split('.')[0])
+        except Exception:
+            replica = None
+    STORAGE_DB.store_shard(
+        shard_name=shard_name,
+        instruction_id=instruction_id,
+        shard_index=int(shard_index) if shard_index is not None else None,
+        replica=replica or 1,
+        data=shard_data,
+        share=shard_dict.get('share') if shard_dict else None,
+        signature=signature,
+        sender_id=sender_id,
+        destination=relay_meta.get('destination', ''),
+        data_region=relay_meta.get('data_region', ''),
+        relay_hops=int(relay_meta.get('relay_hops', 0)),
+        received_at=int(relay_meta.get('received_at', int(time.time())))
+    )
+
+def get_shard_record(shard_name: str) -> Optional[Dict[str, Any]]:
+    return STORAGE_DB.get_shard(shard_name)
+
+def shard_exists(shard_name: str) -> bool:
+    return get_shard_record(shard_name) is not None
+
+def store_manifest_record(instruction_id: str, manifest: Dict[str, Any]):
+    STORAGE_DB.store_manifest(instruction_id, manifest)
+
+def get_manifest_record(instruction_id: str) -> Optional[Dict[str, Any]]:
+    return STORAGE_DB.get_manifest(instruction_id)
+
+def list_manifest_records() -> List[Dict[str, Any]]:
+    return STORAGE_DB.list_manifests()
 # ===== KEY MANAGEMENT (KMS/HSM-READY) =====
 KEY_STORE_PATH = _config('key_store_path', 'oneseam_keys.json')
 DEFAULT_SIGNING_KEY_ID = _config('signing_key_id', 'node_signing')
@@ -751,6 +1228,58 @@ KEY_PROVIDER = LocalKeyProvider(KEY_STORE_PATH)
 def get_signing_key() -> Tuple[bytes, int, str]:
     key, version = KEY_PROVIDER.get_key(DEFAULT_SIGNING_KEY_ID)
     return key, version, DEFAULT_SIGNING_KEY_ID
+
+def _load_or_create_shard_signing_keys() -> Tuple[ed25519.Ed25519PrivateKey, bytes]:
+    if not CRYPTO_AVAILABLE:
+        raise RuntimeError("cryptography required for shard signing")
+    priv = None
+    pub_bytes = None
+    if SHARD_SIGNING_PRIVATE_KEY and os.path.exists(SHARD_SIGNING_PRIVATE_KEY):
+        with open(SHARD_SIGNING_PRIVATE_KEY, 'rb') as f:
+            priv = serialization.load_pem_private_key(f.read(), password=None)
+    if priv is None:
+        priv = ed25519.Ed25519PrivateKey.generate()
+        pem = priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+        with open(SHARD_SIGNING_PRIVATE_KEY, 'wb') as f:
+            f.write(pem)
+    pub = priv.public_key()
+    pub_bytes = pub.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    if SHARD_SIGNING_PUBLIC_KEY:
+        if not os.path.exists(SHARD_SIGNING_PUBLIC_KEY):
+            with open(SHARD_SIGNING_PUBLIC_KEY, 'wb') as f:
+                f.write(pub_bytes)
+    return priv, pub_bytes
+
+def get_node_signing_public() -> str:
+    _, pub_bytes = _load_or_create_shard_signing_keys()
+    return pub_bytes.decode('utf-8')
+
+def sign_shard_payload(shard_name: str, shard_data: str, instruction_id: str) -> str:
+    priv, _ = _load_or_create_shard_signing_keys()
+    msg = f"{shard_name}|{instruction_id}|{shard_data}".encode()
+    sig = priv.sign(msg)
+    return base64.b64encode(sig).decode('ascii')
+
+def verify_shard_signature(sender_id: str, shard_name: str, shard_data: str, instruction_id: str, signature: str) -> bool:
+    if not signature:
+        return False
+    pub_pem = TRUSTED_NODE_PUBKEYS.get(sender_id) or neighbors.get(sender_id, {}).get('signing_pub')
+    if not pub_pem:
+        return False
+    try:
+        pub = serialization.load_pem_public_key(pub_pem.encode('utf-8'))
+        msg = f"{shard_name}|{instruction_id}|{shard_data}".encode()
+        pub.verify(base64.b64decode(signature), msg)
+        return True
+    except Exception:
+        return False
 
 # ===== JWT AUTH =====
 def _load_jwt_public_keys() -> List[str]:
@@ -886,15 +1415,11 @@ def metrics_snapshot() -> Dict[str, Any]:
 
 # ===== AUDIT LOG (IMMUTABLE CHAIN) =====
 def _audit_last_hash() -> str:
-    if not os.path.exists(AUDIT_LOG):
-        return ''
     try:
-        with open(AUDIT_LOG, 'r') as f:
-            lines = f.read().splitlines()
-        if not lines:
+        events = STORAGE_DB.list_audit_events()
+        if not events:
             return ''
-        last = json.loads(lines[-1])
-        return last.get('hash', '')
+        return events[-1].get('hash', '')
     except Exception:
         return ''
 
@@ -906,7 +1431,7 @@ def append_audit_event(event_type: str, actor: str, instruction_id: Optional[str
     prev_hash = _audit_last_hash()
     event = {
         'event_id': str(uuid_lib.uuid4()),
-        'timestamp': int(time.time()),
+        'timestamp': int(time.time() * 1000),
         'actor': actor,
         'node_id': node_id,
         'instruction_id': instruction_id or '',
@@ -922,41 +1447,35 @@ def append_audit_event(event_type: str, actor: str, instruction_id: Optional[str
     event['signature'] = signature
     event['key_id'] = key_id
     event['key_version'] = version
-    with open(AUDIT_LOG, 'a') as f:
-        f.write(json.dumps(event) + '\n')
-        f.flush()
-        os.fsync(f.fileno())
+    try:
+        STORAGE_DB.record_audit(event)
+    except Exception:
+        pass
     log_event('INFO', 'audit_event', event_type=event_type, actor=actor,
               instruction_id=instruction_id or '', request_id=request_id or '')
 
-def verify_audit_log(path: Optional[str] = None) -> Tuple[bool, int]:
+def verify_audit_log() -> Tuple[bool, int]:
     """Verify audit log hash chain integrity. Returns (ok, count)."""
-    log_path = path or AUDIT_LOG
-    if not os.path.exists(log_path):
-        return True, 0
     prev_hash = ''
     count = 0
     try:
-        with open(log_path, 'r') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                event = json.loads(line)
-                event_hash = event.get('hash', '')
-                prev = event.get('prev_hash', '')
-                if prev != prev_hash:
-                    return False, count
-                core = dict(event)
-                core.pop('hash', None)
-                core.pop('signature', None)
-                core.pop('key_id', None)
-                core.pop('key_version', None)
-                event_str = json.dumps(core, sort_keys=True)
-                expected = sha256((prev_hash + event_str).encode()).hexdigest()
-                if expected != event_hash:
-                    return False, count
-                prev_hash = event_hash
-                count += 1
+        events = STORAGE_DB.list_audit_events()
+        for event in events:
+            event_hash = event.get('hash', '')
+            prev = event.get('prev_hash', '')
+            if prev != prev_hash:
+                return False, count
+            core = dict(event)
+            core.pop('hash', None)
+            core.pop('signature', None)
+            core.pop('key_id', None)
+            core.pop('key_version', None)
+            event_str = json.dumps(core, sort_keys=True)
+            expected = sha256((prev_hash + event_str).encode()).hexdigest()
+            if expected != event_hash:
+                return False, count
+            prev_hash = event_hash
+            count += 1
     except Exception:
         return False, count
     return True, count
@@ -986,7 +1505,7 @@ def record_metering_event(instruction_id: str, client_id: str, access_release_to
     event = {
         'instruction_id': instruction_id,
         'client_id': client_id,
-        'timestamp': int(time.time()),
+        'timestamp': int(time.time() * 1000),
         'node_id': node_id,
         'event_type': 'instruction_reconstructed',
         'billable': True,
@@ -1000,12 +1519,9 @@ def record_metering_event(instruction_id: str, client_id: str, access_release_to
         (event_str + node_id + str(event['timestamp'])).encode()
     ).hexdigest()
     
-    # Append-only log (auditable, immutable)
+    # Persist metering event
     try:
-        with open(METERING_LOG, 'a') as f:
-            f.write(json.dumps(event) + '\n')
-            f.flush()
-            os.fsync(f.fileno())
+        STORAGE_DB.record_metering(event)
         print(f'[METERING] [OK] Billable event: {instruction_id} (${event["price_usd"]}) [ART: {access_release_token[:16]}...]')
     except Exception as e:
         print(f'[METERING] [X] Failed to record: {e}')
@@ -1013,33 +1529,17 @@ def record_metering_event(instruction_id: str, client_id: str, access_release_to
 def get_billing_report(client_id: str, start_time: int, end_time: int) -> Dict:
     """
     Generate billing report for client
-    Returns: instruction count × $0.02
+    Returns: instruction count x $0.02
     """
-    if not os.path.exists(METERING_LOG):
-        return {
-            'client_id': client_id,
-            'total_instructions': 0,
-            'price_per_instruction': 0.02,
-            'amount_due_usd': 0.00
-        }
-    
     count = 0
     events = []
-    
     try:
-        with open(METERING_LOG, 'r') as f:
-            for line in f:
-                try:
-                    event = json.loads(line)
-                    if (event['client_id'] == client_id and 
-                        start_time <= event['timestamp'] <= end_time and
-                        event.get('billable', False)):
-                        count += 1
-                        events.append(event)
-                except:
-                    continue
+        events = STORAGE_DB.list_metering_events(client_id, start_time, end_time)
+        for event in events:
+            if event.get('billable', False):
+                count += 1
     except Exception as e:
-        print(f'[BILLING] Error reading log: {e}')
+        print(f'[BILLING] Error reading metering: {e}')
     
     return {
         'client_id': client_id,
@@ -1065,26 +1565,17 @@ def get_node_id() -> str:
     return node_id
 
 def ensure_storage():
-    """Create storage directory if not exists"""
-    if not os.path.exists(STORAGE_DIR):
-        os.makedirs(STORAGE_DIR)
+    """Initialize storage backend"""
+    try:
+        STORAGE_DB.connect()
+        STORAGE_DB.init_schema()
+    except Exception as e:
+        raise RuntimeError(f'Failed to initialize storage: {e}')
 
 def list_shards() -> List[str]:
-    """List all shard files in storage"""
-    return os.listdir(STORAGE_DIR) if os.path.exists(STORAGE_DIR) else []
+    """List all shard names in storage"""
+    return STORAGE_DB.list_shards()
 
-def shard_file_path(shard_name: str) -> str:
-    """Get full path to shard file"""
-    return os.path.join(STORAGE_DIR, shard_name)
-
-def _atomic_write_json(path: str, data: Dict, indent: Optional[int] = None):
-    """Atomic JSON write to avoid partial files."""
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, 'w') as f:
-        json.dump(data, f, indent=indent)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
 
 def split_text(text: str, n: int) -> List[str]:
     """Legacy: Split text into n equal parts (NOT zero-knowledge)"""
@@ -1141,16 +1632,18 @@ def reconstruct_instruction_from_shards(encrypted_b64: str, shard_dicts: List[Di
 
 def print_status():
     """Display node status"""
-    print(f'\n╔═══════════════════════════════════════╗')
-    print(f'║  ONESEAM ENTERPRISE NODE STATUS      ║')
-    print(f'╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  ONESEAM ENTERPRISE NODE STATUS')
+    print('='*47)
     print(f'Node ID: {node_id[:16]}...')
     relay_status = 'Blind Relay ON' if BLIND_RELAY_ENABLED else 'Blind Relay OFF'
     print(f'Transport: {TRANSPORT_MODE} | Quorum: {DEFAULT_QUORUM_K}-of-{DEFAULT_QUORUM_N} | {relay_status}')
     print(f'SEAM Protocol: v1.0 (enabled)')
-    print(f'Storage: {sum(os.path.getsize(shard_file_path(f)) for f in list_shards())} bytes')
-    print(f'Shards: {len([f for f in list_shards() if not f.endswith("_manifest.json")])}')
-    print(f'Instructions: {len([f for f in list_shards() if f.endswith("_manifest.json")])}')
+    shard_count = len(list_shards())
+    manifest_count = len(list_manifest_records())
+    print(f'Storage: db_backend={DB_BACKEND}')
+    print(f'Shards: {shard_count}')
+    print(f'Instructions: {manifest_count}')
     
     with neighbors_lock:
         count = len(neighbors)
@@ -1303,24 +1796,21 @@ def create_instruction_manifest(instr: Dict, shards: List, encrypted_payload_b64
 
 def append_log_to_manifest(instruction_id: str, event: str, node_id_override: str = None):
     """Append audit event to manifest"""
-    manifest_path = shard_file_path(f'{instruction_id}_manifest.json')
-    if not os.path.exists(manifest_path):
-        return
-    
     try:
-        with open(manifest_path, 'r') as f:
-            manifest = json.load(f)
+        manifest = get_manifest_record(instruction_id)
+        if not manifest:
+            return
         
         log_entry = {
             'event': event,
             'instruction_id': instruction_id,
-            'timestamp': int(time.time()),
+            'timestamp': int(time.time() * 1000),
             'node_id': node_id_override or node_id
         }
         log_entry['signature'] = sign_log_entry(log_entry, node_id_override or node_id)
         manifest.setdefault('log', []).append(log_entry)
         
-        _atomic_write_json(manifest_path, manifest, indent=2)
+        store_manifest_record(instruction_id, manifest)
         try:
             append_audit_event(event, node_id_override or node_id, instruction_id)
         except Exception:
@@ -1343,16 +1833,9 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
     Returns:
         Reconstructed instruction or None if quorum not met
     """
-    manifest_path = shard_file_path(f'{instruction_id}_manifest.json')
-    if not os.path.exists(manifest_path):
+    manifest = get_manifest_record(instruction_id)
+    if not manifest:
         print(f'[QUORUM] Manifest not found: {instruction_id}')
-        return None
-    
-    try:
-        with open(manifest_path, 'r') as f:
-            manifest = json.load(f)
-    except Exception as e:
-        print(f'[QUORUM] Error reading manifest: {e}')
         return None
     
     k = threshold or manifest.get('quorum_threshold', manifest.get('quorum_k', 2))
@@ -1377,19 +1860,14 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
         for shard_idx in shard_indices:
             for replica in range(1, 4):  # Up to 3 replicas
                 shard_name = f'{instruction_id}_shard{shard_idx}_v{replica}.json'
-                shard_path = shard_file_path(shard_name)
-                if os.path.exists(shard_path):
-                    try:
-                        with open(shard_path, 'r') as f:
-                            data = json.load(f)
-                        idx = data.get('index')
-                        share = data.get('share')
-                        if idx is not None and share and idx not in seen_indices:
-                            available_shards.append({'index': idx, 'share': share})
-                            seen_indices.add(idx)
-                            break
-                    except Exception:
-                        continue
+                data = get_shard_record(shard_name)
+                if data:
+                    idx = data.get('index')
+                    share = data.get('share')
+                    if idx is not None and share and idx not in seen_indices:
+                        available_shards.append({'index': idx, 'share': share})
+                        seen_indices.add(idx)
+                        break
         
         if len(available_shards) < k:
             print(f'[QUORUM] [X] Only {len(available_shards)}/{k} SSS shards available')
@@ -1410,16 +1888,12 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
             shard_found = False
             for replica in range(1, 4):
                 shard_name = f'{instruction_id}_shard{shard_idx}_v{replica}.json'
-                shard_path = shard_file_path(shard_name)
-                if os.path.exists(shard_path):
-                    try:
-                        with open(shard_path, 'r') as f:
-                            data = json.load(f)['data']
-                        available_shards.append((shard_idx, data))
-                        shard_found = True
-                        break
-                    except Exception:
-                        continue
+                data = get_shard_record(shard_name)
+                if data:
+                    payload = data.get('data')
+                    available_shards.append((shard_idx, payload))
+                    shard_found = True
+                    break
             if not shard_found:
                 print(f'[QUORUM] Shard {shard_idx} completely missing')
         
@@ -1511,87 +1985,68 @@ def find_relay_targets(instruction_id: str, destination: str, data_region: str,
     sorted_neighbors = sorted(all_neighbors, key=score, reverse=True)
     return [n for n in sorted_neighbors if score(n)[0] >= 0]
 
-def relay_thread():
+async def relay_worker():
     """
-    Background thread: periodically relay shards we hold towards destination.
-    Blind Relay - nodes accept shards not for them and repass when finding closer nodes.
+    Relay worker: repass shards immediately from an in-memory queue.
     """
-    RELAY_INTERVAL = 45  # seconds
     while True:
+        shard_payload = await RELAY_QUEUE.get()
         try:
             if not BLIND_RELAY_ENABLED:
-                time.sleep(RELAY_INTERVAL)
+                continue
+            shard_name = shard_payload['shard_name']
+            destination = shard_payload.get('destination', '')
+            data_region = shard_payload.get('data_region', '')
+            relay_hops = int(shard_payload.get('relay_hops', 0))
+            shard_data = shard_payload.get('shard_data', '')
+            shard_dict = shard_payload.get('shard_dict')
+            signature = shard_payload.get('signature', '')
+            sender_id = shard_payload.get('sender_id', '')
+            
+            if is_destination_node(destination):
+                continue
+            if relay_hops >= MAX_RELAY_HOPS:
                 continue
             
-            ensure_storage()
-            shard_files = [
-                f for f in list_shards()
-                if f.endswith('.json') and not f.endswith('_manifest.json')
-            ]
+            instruction_id = shard_name.rsplit('_shard', 1)[0] if '_shard' in shard_name else ''
+            if not instruction_id:
+                continue
             
-            relayed_count = 0
-            for shard_file in shard_files:
-                try:
-                    path = shard_file_path(shard_file)
-                    with open(path, 'r') as f:
-                        stored = json.load(f)
-                    
-                    destination = stored.get('destination', '')
-                    data_region = stored.get('data_region', '')
-                    relay_hops = stored.get('relay_hops', 0)
-                    
-                    if is_destination_node(destination):
-                        continue
-                    if relay_hops >= MAX_RELAY_HOPS:
-                        continue
-                    
-                    instruction_id = shard_file.rsplit('_shard', 1)[0] if '_shard' in shard_file else ''
-                    if not instruction_id:
-                        continue
-                    
-                    targets = find_relay_targets(instruction_id, destination, data_region)
-                    if not targets:
-                        continue
-                    
-                    shard_data = stored.get('data', json.dumps(stored))
-                    shard_dict = None
-                    if stored.get('index') is not None and stored.get('share'):
-                        shard_dict = {'index': stored['index'], 'share': stored['share']}
-                    
-                    relay_meta = {
-                        'destination': destination,
-                        'data_region': data_region,
-                        'relay_hops': relay_hops + 1
-                    }
-                    msg = {
-                        'cmd': CMD_STORE_SHARD,
-                        'shard_name': shard_file,
-                        'shard_data': shard_data,
-                        'instruction_id': instruction_id,
-                        **relay_meta
-                    }
-                    if shard_dict:
-                        msg['shard_dict'] = shard_dict
-                    
-                    for target in targets[:2]:
-                        ip = target.get('ip')
-                        if not ip or ip == '127.0.0.1':
-                            continue
-                        resp = send_to_node(ip, msg, port=target.get('node_port', NODE_PORT))
-                        if resp and resp == b'OK':
-                            relayed_count += 1
-                            if not QUIET_MODE:
-                                print(f'[RELAY] [OK] Relayed {shard_file} -> {ip} (hops={relay_hops + 1})')
-                            break
-                except Exception as e:
+            targets = find_relay_targets(instruction_id, destination, data_region)
+            if not targets:
+                continue
+            
+            relay_meta = {
+                'destination': destination,
+                'data_region': data_region,
+                'relay_hops': relay_hops + 1
+            }
+            msg = {
+                'cmd': CMD_STORE_SHARD,
+                'shard_name': shard_name,
+                'shard_data': shard_data,
+                'instruction_id': instruction_id,
+                'signature': signature,
+                'sender_id': sender_id,
+                **relay_meta
+            }
+            if shard_dict:
+                msg['shard_dict'] = shard_dict
+            
+            for target in targets[:2]:
+                ip = target.get('ip')
+                if not ip or ip == '127.0.0.1':
                     continue
-            
-            if relayed_count and not QUIET_MODE:
-                print(f'[RELAY] Relayed {relayed_count} shards this cycle')
+                resp = await send_to_node_async(ip, msg, port=target.get('node_port', NODE_PORT))
+                if resp and resp == b'OK':
+                    if not QUIET_MODE:
+                        print(f'[RELAY] [OK] Relayed {shard_name} -> {ip} (hops={relay_hops + 1})')
+                    break
         except Exception as e:
             if not QUIET_MODE:
                 print(f'[RELAY] Error: {e}')
-        time.sleep(RELAY_INTERVAL)
+        finally:
+            RELAY_QUEUE.task_done()
 
 # ===== SMART ROUTING (Data Sovereignty) =====
 def find_nodes_near_bank(bank_id: str, region_hint: Optional[str] = None,
@@ -1651,6 +2106,7 @@ def distribute_shards_smart(shards_data, instruction_id: str, destination_bank_i
                 shard_idx = shard_dict.get('index', idx + 1)
                 shard_name = f'{instruction_id}_shard{shard_idx}_v{replica+1}.json'
                 shard_payload = json.dumps({'index': shard_dict['index'], 'share': shard_dict['share']})
+                signature = sign_shard_payload(shard_name, shard_payload, instruction_id) if SHARD_SIGNATURE_REQUIRED else ''
                 target = destination_nodes[(idx * 3 + replica) % len(destination_nodes)]
                 ip = target['ip']
                 relay_meta = {
@@ -1659,9 +2115,14 @@ def distribute_shards_smart(shards_data, instruction_id: str, destination_bank_i
                     'relay_hops': 0
                 }
                 if ip == '127.0.0.1':
-                    _atomic_write_json(shard_file_path(shard_name), {'data': shard_payload, 'index': shard_dict['index'],
-                                  'share': shard_dict['share'], 'timestamp': int(time.time()),
-                                  **relay_meta})
+                    store_shard_record(
+                        shard_name,
+                        shard_payload,
+                        shard_dict,
+                        {**relay_meta, 'received_at': int(time.time())},
+                        signature,
+                        node_id or ''
+                    )
                     print(f'[DISTRIBUTE] [OK] Local: {shard_name}')
                     total_distributed += 1
                 else:
@@ -1671,6 +2132,8 @@ def distribute_shards_smart(shards_data, instruction_id: str, destination_bank_i
                         'shard_data': shard_payload,
                         'shard_dict': shard_dict,
                         'instruction_id': instruction_id,
+                        'signature': signature,
+                        'sender_id': node_id or '',
                         **relay_meta
                     }
                     resp = send_to_node(ip, msg, port=target.get('node_port', NODE_PORT))
@@ -1689,15 +2152,24 @@ def distribute_shards_smart(shards_data, instruction_id: str, destination_bank_i
         for idx, shard in enumerate(shards_data):
             for replica in range(3):
                 shard_name = f'{instruction_id}_shard{idx+1}_v{replica+1}.json'
+                signature = sign_shard_payload(shard_name, shard, instruction_id) if SHARD_SIGNATURE_REQUIRED else ''
                 target = destination_nodes[(idx * 3 + replica) % len(destination_nodes)]
                 ip = target['ip']
                 if ip == '127.0.0.1':
-                    _atomic_write_json(shard_file_path(shard_name), {'data': shard, 'timestamp': int(time.time()), **relay_meta})
+                    store_shard_record(
+                        shard_name,
+                        shard,
+                        None,
+                        {**relay_meta, 'received_at': int(time.time())},
+                        signature,
+                        node_id or ''
+                    )
                     print(f'[DISTRIBUTE] [OK] Local: {shard_name}')
                     total_distributed += 1
                 else:
                     msg = {'cmd': CMD_STORE_SHARD, 'shard_name': shard_name, 'shard_data': shard,
-                           'instruction_id': instruction_id, **relay_meta}
+                           'instruction_id': instruction_id, 'signature': signature,
+                           'sender_id': node_id or '', **relay_meta}
                     resp = send_to_node(ip, msg, port=target.get('node_port', NODE_PORT))
                     if resp and resp == b'OK':
                         print(f'[DISTRIBUTE] [OK] Remote: {shard_name} -> {ip}')
@@ -1708,9 +2180,8 @@ def distribute_shards_smart(shards_data, instruction_id: str, destination_bank_i
     expected = n * 3
     print(f'[DISTRIBUTE] Total: {total_distributed}/{expected} shards distributed')
     
-    manifest_path = shard_file_path(f'{instruction_id}_manifest.json')
-    _atomic_write_json(manifest_path, manifest, indent=2)
-    print(f'[DISTRIBUTE] Manifest saved: {manifest_path}')
+    store_manifest_record(instruction_id, manifest)
+    print(f'[DISTRIBUTE] Manifest saved: {instruction_id}')
     
     # Distribute manifest to neighbors (destination can fetch)
     for target in destination_nodes[:5]:
@@ -1720,21 +2191,15 @@ def distribute_shards_smart(shards_data, instruction_id: str, destination_bank_i
             if resp and b'OK' in resp:
                 print(f'[DISTRIBUTE] [OK] Manifest sent to {target["ip"]}')
 
-def collect_shards_dynamically(instruction_id: str, max_attempts: int = 10,
-                               poll_interval: float = 2.0) -> bool:
+async def collect_shards_dynamically_async(instruction_id: str, max_attempts: int = 10,
+                                           poll_interval: float = 2.0) -> bool:
     """
     Destination node: dynamically collect shards from neighbors until quorum.
     Returns True if quorum achieved and shards collected locally.
     """
-    manifest_path = shard_file_path(f'{instruction_id}_manifest.json')
-    if not os.path.exists(manifest_path):
+    manifest = get_manifest_record(instruction_id)
+    if not manifest:
         print(f'[COLLECT] Manifest not found: {instruction_id}')
-        return False
-    try:
-        with open(manifest_path, 'r') as f:
-            manifest = json.load(f)
-    except Exception as e:
-        print(f'[COLLECT] Error reading manifest: {e}')
         return False
     
     k = manifest.get('quorum_k', manifest.get('quorum_threshold', 2))
@@ -1748,19 +2213,16 @@ def collect_shards_dynamically(instruction_id: str, max_attempts: int = 10,
             if sharding_mode == 'sss':
                 for replica in range(1, 4):
                     shard_name = f'{instruction_id}_shard{shard_idx}_v{replica}.json'
-                    if os.path.exists(shard_file_path(shard_name)):
-                        try:
-                            with open(shard_file_path(shard_name), 'r') as f:
-                                data = json.load(f)
-                            if 'index' in data:
-                                collected_indices.add(data['index'])
-                        except Exception:
-                            pass
+                    data = get_shard_record(shard_name)
+                    if data:
+                        idx = data.get('index')
+                        if idx is not None:
+                            collected_indices.add(idx)
                         break
             else:
                 for replica in range(1, 4):
                     shard_name = f'{instruction_id}_shard{shard_idx}_v{replica}.json'
-                    if os.path.exists(shard_file_path(shard_name)):
+                    if shard_exists(shard_name):
                         collected_indices.add(shard_idx)
                         break
         
@@ -1777,40 +2239,65 @@ def collect_shards_dynamically(instruction_id: str, max_attempts: int = 10,
             for shard_idx in manifest.get('shard_indices', list(range(1, n + 1))):
                 for replica in range(1, 4):
                     shard_name = f'{instruction_id}_shard{shard_idx}_v{replica}.json'
-                    if os.path.exists(shard_file_path(shard_name)):
+                    if shard_exists(shard_name):
                         continue
                     msg = {'cmd': CMD_FETCH_SHARD, 'shard_name': shard_name}
-                    resp = send_to_node(neighbor['ip'], msg)
+                    resp = await send_to_node_async(neighbor['ip'], msg)
                     if resp:
                         try:
                             r = json.loads(resp.decode())
                             if r.get('status') == 'OK':
                                 if r.get('index') is not None and r.get('share'):
-                                    _atomic_write_json(shard_file_path(shard_name), {'data': r.get('shard_data'), 'index': r['index'],
-                                                  'share': r['share'], 'received_at': int(time.time())})
+                                    if SHARD_SIGNATURE_REQUIRED and not verify_shard_signature(r.get('sender_id', ''), shard_name, r.get('shard_data'), instruction_id, r.get('signature', '')):
+                                        continue
+                                    store_shard_record(
+                                        shard_name,
+                                        r.get('shard_data'),
+                                        {'index': r['index'], 'share': r['share']},
+                                        {'received_at': int(time.time()), 'destination': manifest.get('destination', ''),
+                                         'data_region': manifest.get('data_region', ''), 'relay_hops': 0},
+                                        r.get('signature'),
+                                        r.get('sender_id', '')
+                                    )
                                 else:
                                     data = r.get('shard_data', r)
-                                    _atomic_write_json(shard_file_path(shard_name), {'data': data, 'received_at': int(time.time())})
+                                    if SHARD_SIGNATURE_REQUIRED and not verify_shard_signature(r.get('sender_id', ''), shard_name, data, instruction_id, r.get('signature', '')):
+                                        continue
+                                    store_shard_record(
+                                        shard_name,
+                                        data,
+                                        None,
+                                        {'received_at': int(time.time()), 'destination': manifest.get('destination', ''),
+                                         'data_region': manifest.get('data_region', ''), 'relay_hops': 0},
+                                        r.get('signature'),
+                                        r.get('sender_id', '')
+                                    )
                                 print(f'[COLLECT] [OK] Fetched {shard_name} from {neighbor["ip"]}')
                                 break
                         except Exception:
                             pass
         
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
     
     print(f'[COLLECT] [X] Quorum not achieved after {max_attempts} attempts')
     return False
 
+def collect_shards_dynamically(instruction_id: str, max_attempts: int = 10,
+                               poll_interval: float = 2.0) -> bool:
+    return run_async(collect_shards_dynamically_async(instruction_id, max_attempts, poll_interval))
+
 # ===== NETWORKING: DISCOVERY (On-Grid / Off-Grid) =====
-def broadcast_presence():
+async def broadcast_presence_async():
     """Broadcast node presence via UDP (on-grid) or mesh (off-grid)"""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.setblocking(False)
     
     capabilities = ['storage', 'reconstruction', 'routing', 'seam_v1']
     if TRANSPORT_MODE in ('OFF_GRID', 'HYBRID'):
         capabilities.append('mesh')
     
+    loop = asyncio.get_running_loop()
     while True:
         try:
             msg = json.dumps({
@@ -1822,22 +2309,25 @@ def broadcast_presence():
                 'transport_mode': TRANSPORT_MODE,
                 'region': CONFIG.get('region', ''),
                 'country_code': CONFIG.get('country_code', ''),
-                'served_destinations': SERVED_DESTINATIONS
+                'served_destinations': SERVED_DESTINATIONS,
+                'node_signing_pub': get_node_signing_public()
             }).encode()
-            s.sendto(msg, (BROADCAST_ADDR, BROADCAST_PORT))
+            await loop.sock_sendto(s, msg, (BROADCAST_ADDR, BROADCAST_PORT))
         except Exception:
             pass
-        time.sleep(5)
+        await asyncio.sleep(5)
 
-def listen_broadcast():
+async def listen_broadcast_async():
     """Listen for UDP broadcasts from other nodes"""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(('', BROADCAST_PORT))
+    s.setblocking(False)
+    loop = asyncio.get_running_loop()
     
     while True:
         try:
-            data, addr = s.recvfrom(BUFFER_SIZE)
+            data, addr = await loop.sock_recvfrom(s, BUFFER_SIZE)
             msg = json.loads(data.decode())
             
             if msg.get('cmd') == CMD_HANDSHAKE and msg.get('node_id') != node_id:
@@ -1852,12 +2342,70 @@ def listen_broadcast():
                         'country_code': msg.get('country_code', ''),
                         'served_destinations': msg.get('served_destinations', []),
                         'last_seen': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'last_seen_ts': time.time()
+                        'last_seen_ts': time.time(),
+                        'signing_pub': msg.get('node_signing_pub', '')
                     }
         except Exception:
-            continue
+            await asyncio.sleep(0.1)
 
-def prune_neighbors():
+def _parse_seed_nodes() -> List[Dict[str, Any]]:
+    seeds = []
+    for item in SEED_NODES:
+        if isinstance(item, str):
+            if ':' in item:
+                host, port = item.split(':', 1)
+                try:
+                    port = int(port)
+                except Exception:
+                    port = NODE_PORT
+                seeds.append({'ip': host, 'port': port})
+            else:
+                seeds.append({'ip': item, 'port': NODE_PORT})
+        elif isinstance(item, dict):
+            seeds.append({'ip': item.get('ip'), 'port': item.get('port', NODE_PORT)})
+    return [s for s in seeds if s.get('ip')]
+
+async def bootstrap_seeds():
+    while True:
+        seeds = _parse_seed_nodes()
+        if not seeds:
+            await asyncio.sleep(30)
+            continue
+        msg = {
+            'cmd': CMD_HANDSHAKE,
+            'node_id': node_id,
+            'node_port': NODE_PORT,
+            'capabilities': ['storage', 'reconstruction', 'routing', 'seam_v1'],
+            'version': '2.0',
+            'transport_mode': TRANSPORT_MODE,
+            'region': CONFIG.get('region', ''),
+            'country_code': CONFIG.get('country_code', ''),
+            'served_destinations': SERVED_DESTINATIONS,
+            'node_signing_pub': get_node_signing_public()
+        }
+        for seed in seeds:
+            try:
+                await send_to_node_async(seed['ip'], msg, port=seed['port'])
+            except Exception:
+                continue
+        await asyncio.sleep(30)
+
+def try_upnp():
+    if not UPNP_ENABLED:
+        return
+    try:
+        import miniupnpc
+        upnp = miniupnpc.UPnP()
+        upnp.discoverdelay = 200
+        upnp.discover()
+        upnp.selectigd()
+        external_ip = upnp.externalipaddress()
+        upnp.addportmapping(NODE_PORT, 'TCP', upnp.lanaddr, NODE_PORT, 'Oneseam P2P', '')
+        print(f'[UPNP] Mapped TCP {NODE_PORT} on {external_ip}')
+    except Exception as e:
+        print(f'[UPNP] Failed: {e}')
+
+async def prune_neighbors_async():
     """Remove stale neighbors."""
     while True:
         try:
@@ -1870,54 +2418,39 @@ def prune_neighbors():
                         stale.append(nid)
                 for nid in stale:
                     neighbors.pop(nid, None)
-            time.sleep(NEIGHBOR_TTL_SECONDS)
+            await asyncio.sleep(NEIGHBOR_TTL_SECONDS)
         except Exception:
-            time.sleep(NEIGHBOR_TTL_SECONDS)
+            await asyncio.sleep(NEIGHBOR_TTL_SECONDS)
 
 # ===== NETWORKING: TCP SERVER =====
-def server_thread():
-    """TCP server to receive requests from other nodes"""
+async def start_p2p_server():
+    """Async TCP server to receive requests from other nodes"""
     ensure_storage()
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('', NODE_PORT))
-    s.listen(10)
-    
-    print(f'[P2P] TCP server listening on port {NODE_PORT}')
-    log_event('INFO', 'p2p_listen', port=NODE_PORT, tls=P2P_TLS_ENABLED)
     ssl_ctx = None
     if P2P_TLS_ENABLED:
         if not P2P_TLS_CERT_PATH or not P2P_TLS_KEY_PATH:
-            print('[P2P] TLS enabled but cert/key not configured. Falling back to plaintext.')
-        else:
-            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ssl_ctx.load_cert_chain(P2P_TLS_CERT_PATH, P2P_TLS_KEY_PATH)
-            if P2P_MTLS_CA_PATH:
-                ssl_ctx.load_verify_locations(P2P_MTLS_CA_PATH)
-                ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-    
-    while True:
-        try:
-            conn, addr = s.accept()
-            if ssl_ctx:
-                try:
-                    conn = ssl_ctx.wrap_socket(conn, server_side=True)
-                except Exception as e:
-                    print(f'[P2P] TLS handshake failed: {e}')
-                    conn.close()
-                    continue
-            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-        except Exception:
-            continue
+            raise RuntimeError('[P2P] TLS enabled but cert/key not configured.')
+        if P2P_MTLS_REQUIRED and not P2P_MTLS_CA_PATH:
+            raise RuntimeError('[P2P] mTLS required but CA not configured.')
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(P2P_TLS_CERT_PATH, P2P_TLS_KEY_PATH)
+        if P2P_MTLS_CA_PATH:
+            ssl_ctx.load_verify_locations(P2P_MTLS_CA_PATH)
+            ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+    server = await asyncio.start_server(handle_client_async, host='', port=NODE_PORT, ssl=ssl_ctx)
+    log_event('INFO', 'p2p_listen', port=NODE_PORT, tls=P2P_TLS_ENABLED)
+    async with server:
+        await server.serve_forever()
 
-def handle_client(conn, addr):
-    """Handle incoming P2P request"""
+async def handle_client_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """Handle incoming P2P request (async)"""
     try:
         metric_inc('p2p_messages_total')
         if P2P_TLS_ENABLED and P2P_MTLS_CA_PATH and P2P_MTLS_ALLOWED_CNS:
             try:
-                cert = conn.getpeercert()
-                subject = cert.get('subject', [])
+                ssl_obj = writer.get_extra_info('ssl_object')
+                cert = ssl_obj.getpeercert() if ssl_obj else None
+                subject = cert.get('subject', []) if cert else []
                 cn = ''
                 for attrs in subject:
                     for k, v in attrs:
@@ -1925,83 +2458,148 @@ def handle_client(conn, addr):
                             cn = v
                             break
                 if not cn or cn not in P2P_MTLS_ALLOWED_CNS:
-                    conn.send(json.dumps({'status': 'FORBIDDEN'}).encode())
-                    conn.close()
+                    writer.write(json.dumps({'status': 'FORBIDDEN'}).encode())
+                    await writer.drain()
+                    writer.close()
+                    await writer.wait_closed()
                     return
             except Exception:
-                conn.send(json.dumps({'status': 'FORBIDDEN'}).encode())
-                conn.close()
+                writer.write(json.dumps({'status': 'FORBIDDEN'}).encode())
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
                 return
-        data = conn.recv(BUFFER_SIZE)
+        data = await reader.read(BUFFER_SIZE)
         msg = json.loads(data.decode())
+        if PYDANTIC_AVAILABLE:
+            try:
+                if msg.get('cmd') == CMD_STORE_SHARD:
+                    msg = P2PStoreShard.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_STORE_MANIFEST:
+                    msg = P2PStoreManifest.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_FETCH_SHARD:
+                    msg = P2PFetchShard.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_FETCH_MANIFEST:
+                    msg = P2PFetchManifest.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_HEALTH_CHECK:
+                    msg = P2PHealth.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_HANDSHAKE:
+                    msg = P2PHandshake.model_validate(msg).model_dump()
+            except ValidationError:
+                writer.write(json.dumps({'status': 'BAD_REQUEST'}).encode())
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
         cmd = msg.get('cmd')
         
         if cmd == CMD_STORE_SHARD:
             shard_name = msg['shard_name']
             shard_data = msg['shard_data']
             shard_dict = msg.get('shard_dict')
+            signature = msg.get('signature', '')
+            sender_id = msg.get('sender_id', '')
             relay_meta = {
                 'destination': msg.get('destination', ''),
                 'data_region': msg.get('data_region', ''),
                 'relay_hops': msg.get('relay_hops', 0),
                 'received_at': int(time.time())
             }
+            instruction_id = msg.get('instruction_id', shard_name.split('_shard', 1)[0] if '_shard' in shard_name else '')
+            if SHARD_SIGNATURE_REQUIRED:
+                if not verify_shard_signature(sender_id, shard_name, shard_data, instruction_id, signature):
+                    writer.write(json.dumps({'status': 'FORBIDDEN'}).encode())
+                    await writer.drain()
+                    writer.close()
+                    await writer.wait_closed()
+                    return
             
-            if shard_dict:
-                _atomic_write_json(shard_file_path(shard_name), {'data': shard_data, 'index': shard_dict['index'],
-                              'share': shard_dict['share'], **relay_meta})
-            else:
-                _atomic_write_json(shard_file_path(shard_name), {'data': shard_data, **relay_meta})
-            
-            conn.send(b'OK')
-            if not QUIET_MODE:
-                print(f'[P2P] [OK] Stored: {shard_name} from {addr[0]}')
+            store_shard_record(shard_name, shard_data, shard_dict, relay_meta, signature, sender_id)
+            if BLIND_RELAY_ENABLED and not is_destination_node(relay_meta.get('destination', '')) and relay_meta.get('relay_hops', 0) < MAX_RELAY_HOPS:
+                await RELAY_QUEUE.put({
+                    'shard_name': shard_name,
+                    'shard_data': shard_data,
+                    'shard_dict': shard_dict,
+                    'destination': relay_meta.get('destination', ''),
+                    'data_region': relay_meta.get('data_region', ''),
+                    'relay_hops': relay_meta.get('relay_hops', 0),
+                    'signature': signature,
+                    'sender_id': sender_id
+                })
+            writer.write(b'OK')
+            await writer.drain()
         
         elif cmd == CMD_STORE_MANIFEST:
             instruction_id = msg.get('instruction_id')
             manifest = msg.get('manifest')
             if instruction_id and manifest:
-                manifest_path = shard_file_path(f'{instruction_id}_manifest.json')
-                _atomic_write_json(manifest_path, manifest, indent=2)
-                conn.send(b'OK')
-                print(f'[P2P] [OK] Stored manifest: {instruction_id} from {addr[0]}')
+                store_manifest_record(instruction_id, manifest)
+                writer.write(b'OK')
+                await writer.drain()
                 try:
                     dest = manifest.get('destination', '')
                     if dest and is_destination_node(dest):
-                        print(f'[P2P] Manifest targets this node ({dest}) — starting dynamic collection')
-                        threading.Thread(target=collect_shards_dynamically, args=(instruction_id, 10, 2.0), daemon=True).start()
+                        asyncio.create_task(collect_shards_dynamically_async(instruction_id, 10, 2.0))
                 except Exception:
                     pass
             else:
-                conn.send(json.dumps({'status': 'BAD_REQUEST'}).encode())
+                writer.write(json.dumps({'status': 'BAD_REQUEST'}).encode())
+                await writer.drain()
             
         elif cmd == CMD_FETCH_SHARD:
             shard_name = msg['shard_name']
-            path = shard_file_path(shard_name)
-            
-            if os.path.exists(path):
-                with open(path, 'r') as f:
-                    stored = json.load(f)
+            stored = get_shard_record(shard_name)
+            if stored:
                 shard_data = stored.get('data')
-                if 'index' in stored and 'share' in stored:
+                if stored.get('index') is not None and stored.get('share'):
                     response = json.dumps({'status': 'OK', 'shard_data': shard_data,
-                                          'index': stored['index'], 'share': stored['share']})
+                                          'index': stored['index'], 'share': stored['share'],
+                                          'signature': stored.get('signature', ''), 'sender_id': stored.get('sender_id', '')})
                 else:
-                    response = json.dumps({'status': 'OK', 'shard_data': shard_data})
-                conn.send(response.encode())
+                    response = json.dumps({'status': 'OK', 'shard_data': shard_data,
+                                           'signature': stored.get('signature', ''), 'sender_id': stored.get('sender_id', '')})
+                writer.write(response.encode())
+                await writer.drain()
             else:
-                conn.send(json.dumps({'status': 'NOT_FOUND'}).encode())
+                writer.write(json.dumps({'status': 'NOT_FOUND'}).encode())
+                await writer.drain()
         
         elif cmd == CMD_FETCH_MANIFEST:
             instruction_id = msg.get('instruction_id')
-            manifest_path = shard_file_path(f'{instruction_id}_manifest.json')
-            if instruction_id and os.path.exists(manifest_path):
-                with open(manifest_path, 'r') as f:
-                    manifest = json.load(f)
-                response = json.dumps({'status': 'OK', 'manifest': manifest})
-                conn.send(response.encode())
+            if instruction_id:
+                manifest = get_manifest_record(instruction_id)
+                if manifest:
+                    response = json.dumps({'status': 'OK', 'manifest': manifest})
+                    writer.write(response.encode())
+                    await writer.drain()
+                else:
+                    writer.write(json.dumps({'status': 'NOT_FOUND'}).encode())
+                    await writer.drain()
             else:
-                conn.send(json.dumps({'status': 'NOT_FOUND'}).encode())
+                writer.write(json.dumps({'status': 'NOT_FOUND'}).encode())
+                await writer.drain()
+        
+        elif cmd == CMD_HANDSHAKE:
+            try:
+                with neighbors_lock:
+                    neighbors[msg['node_id']] = {
+                        'ip': writer.get_extra_info('peername')[0] if writer.get_extra_info('peername') else '',
+                        'node_port': msg.get('node_port', NODE_PORT),
+                        'capabilities': msg.get('capabilities', []),
+                        'version': msg.get('version', '0.0'),
+                        'transport_mode': msg.get('transport_mode', 'ON_GRID'),
+                        'region': msg.get('region', ''),
+                        'country_code': msg.get('country_code', ''),
+                        'served_destinations': msg.get('served_destinations', []),
+                        'last_seen': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'last_seen_ts': time.time(),
+                        'signing_pub': msg.get('node_signing_pub', '')
+                    }
+                writer.write(b'OK')
+                await writer.drain()
+            except Exception:
+                writer.write(json.dumps({'status': 'BAD_REQUEST'}).encode())
+                await writer.drain()
                 
         elif cmd == CMD_HEALTH_CHECK:
             response = json.dumps({
@@ -2011,47 +2609,58 @@ def handle_client(conn, addr):
                 'seam_version': '1.0',
                 'uptime': int(time.time())
             })
-            conn.send(response.encode())
+            writer.write(response.encode())
+            await writer.drain()
             
         else:
-            conn.send(json.dumps({'status': 'UNKNOWN_CMD'}).encode())
+            writer.write(json.dumps({'status': 'UNKNOWN_CMD'}).encode())
+            await writer.drain()
             
     except Exception as e:
         metric_inc('p2p_errors_total')
         print(f'[P2P] Error handling client: {e}')
     finally:
-        conn.close()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
 
-def send_to_node(ip: str, msg: Dict, port: int = None) -> Optional[bytes]:
-    """Send request to another node"""
+async def send_to_node_async(ip: str, msg: Dict, port: int = None) -> Optional[bytes]:
+    """Send request to another node (async)"""
     if port is None:
         port = NODE_PORT
+    ssl_ctx = None
+    if P2P_TLS_ENABLED:
+        if P2P_MTLS_REQUIRED and (not P2P_TLS_CERT_PATH or not P2P_TLS_KEY_PATH):
+            raise RuntimeError('[P2P] mTLS required but client cert/key not configured.')
+        ssl_ctx = ssl.create_default_context(cafile=P2P_MTLS_CA_PATH) if P2P_MTLS_CA_PATH else ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        if P2P_TLS_CERT_PATH and P2P_TLS_KEY_PATH:
+            ssl_ctx.load_cert_chain(P2P_TLS_CERT_PATH, P2P_TLS_KEY_PATH)
+        if not P2P_MTLS_CA_PATH:
+            ssl_ctx.verify_mode = ssl.CERT_NONE
     for attempt in range(1, P2P_RETRIES + 1):
         try:
-            raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            raw.settimeout(3)
-            if P2P_TLS_ENABLED:
-                if P2P_MTLS_CA_PATH:
-                    ctx = ssl.create_default_context(cafile=P2P_MTLS_CA_PATH)
-                    ctx.check_hostname = False
-                else:
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                s = ctx.wrap_socket(raw, server_hostname=ip)
-            else:
-                s = raw
-            s.connect((ip, port))
-            s.send(json.dumps(msg).encode())
-            data = s.recv(BUFFER_SIZE)
-            s.close()
+            reader, writer = await asyncio.open_connection(ip, port, ssl=ssl_ctx)
+            writer.write(json.dumps(msg).encode())
+            await writer.drain()
+            data = await reader.read(BUFFER_SIZE)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
             return data
         except Exception as e:
             metric_inc('p2p_errors_total')
             if attempt >= P2P_RETRIES:
                 print(f'[P2P] Error sending to {ip}:{port}: {e}')
                 return None
-            time.sleep(P2P_BACKOFF_BASE * (2 ** (attempt - 1)))
+            await asyncio.sleep(P2P_BACKOFF_BASE * (2 ** (attempt - 1)))
+
+def send_to_node(ip: str, msg: Dict, port: int = None) -> Optional[bytes]:
+    return run_async(send_to_node_async(ip, msg, port))
 
 # ===== SHUTDOWN & MIGRATION =====
 def migrate_shards_on_shutdown():
@@ -2061,7 +2670,7 @@ def migrate_shards_on_shutdown():
     
     local_shards = [
         f for f in list_shards() 
-        if f.endswith('.json') and not f.endswith('_manifest.json')
+        if '_shard' in f
     ]
     
     neighbor_list = [n for n in neighbors.values() if n['ip'] != '127.0.0.1']
@@ -2072,9 +2681,10 @@ def migrate_shards_on_shutdown():
     
     for shard_file in local_shards:
         try:
-            with open(shard_file_path(shard_file), 'r') as f:
-                stored = json.load(f)
-            shard_data = stored.get('data', json.dumps(stored))
+            stored = get_shard_record(shard_file)
+            if not stored:
+                continue
+            shard_data = stored.get('data', '')
             shard_dict = {'index': stored['index'], 'share': stored['share']} if stored.get('index') is not None and stored.get('share') else None
             
             relay_meta = {
@@ -2087,6 +2697,10 @@ def migrate_shards_on_shutdown():
                 msg = {'cmd': CMD_STORE_SHARD, 'shard_name': shard_file, 'shard_data': shard_data, **relay_meta}
                 if shard_dict:
                     msg['shard_dict'] = shard_dict
+                if stored.get('signature'):
+                    msg['signature'] = stored.get('signature')
+                if stored.get('sender_id'):
+                    msg['sender_id'] = stored.get('sender_id')
                 resp = send_to_node(n['ip'], msg, port=n.get('node_port', NODE_PORT))
                 if resp and resp == b'OK':
                     success += 1
@@ -2099,15 +2713,19 @@ def migrate_shards_on_shutdown():
 def handle_shutdown(signum, frame):
     """Graceful shutdown handler"""
     migrate_shards_on_shutdown()
+    try:
+        STORAGE_DB.close()
+    except Exception:
+        pass
     print('[SHUTDOWN] Node stopped.')
     raise SystemExit(0)
 
 # ===== CLI OPERATIONS =====
 def send_instruction():
     """CLI: Send new financial instruction"""
-    print('\n╔═══════════════════════════════════════╗')
-    print('║  NEW FINANCIAL INSTRUCTION           ║')
-    print('╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  NEW FINANCIAL INSTRUCTION')
+    print('='*47)
     
     print('\nSelect instruction type:')
     print('  1. SEAM Payment Obligation')
@@ -2122,7 +2740,7 @@ def send_instruction():
     destination = input('Destination institution ID: ').strip() or 'BANK_TARGET'
     
     # Optional encryption for all SEAM types (1-4) and Legacy (5)
-    use_crypto = input('Encrypt<- (y/n): ').strip().lower() == 'y'
+    use_crypto = input('Encrypt? (y/n): ').strip().lower() == 'y'
     encryption_key = None
     if use_crypto:
         encryption_key = getpass('Encryption password: ')
@@ -2257,19 +2875,11 @@ def send_instruction():
 
 def monitor_instructions():
     """CLI: Monitor received instructions"""
-    print('\n╔═══════════════════════════════════════╗')
-    print('║  RECEIVED INSTRUCTIONS               ║')
-    print('╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  RECEIVED INSTRUCTIONS')
+    print('='*47)
     
-    manifests = []
-    for fname in list_shards():
-        if fname.endswith('_manifest.json'):
-            try:
-                with open(shard_file_path(fname), 'r') as f:
-                    manifest = json.load(f)
-                    manifests.append(manifest)
-            except:
-                continue
+    manifests = list_manifest_records()
     
     if not manifests:
         print('[i] No instructions received yet.')
@@ -2286,14 +2896,10 @@ def monitor_instructions():
         for shard_idx in shard_indices:
             for replica in range(1, 4):
                 shard_name = f'{instr_id}_shard{shard_idx}_v{replica}.json'
-                if os.path.exists(shard_file_path(shard_name)):
-                    try:
-                        with open(shard_file_path(shard_name), 'r') as f:
-                            d = json.load(f)
-                        idx = d.get('index', shard_idx)
-                        seen.add(idx)
-                    except Exception:
-                        seen.add(shard_idx)
+                d = get_shard_record(shard_name)
+                if d:
+                    idx = d.get('index', shard_idx)
+                    seen.add(idx)
                     break
         available = len(seen)
         
@@ -2307,18 +2913,11 @@ def monitor_instructions():
 
 def rebuild_instruction():
     """CLI: Reconstruct instruction with quorum"""
-    print('\n╔═══════════════════════════════════════╗')
-    print('║  RECONSTRUCT INSTRUCTION             ║')
-    print('╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  RECONSTRUCT INSTRUCTION')
+    print('='*47)
     
-    manifests = []
-    for fname in list_shards():
-        if fname.endswith('_manifest.json'):
-            try:
-                with open(shard_file_path(fname), 'r') as f:
-                    manifests.append(json.load(f))
-            except:
-                continue
+    manifests = list_manifest_records()
     
     if not manifests:
         print('[!] No instructions available.')
@@ -2362,9 +2961,9 @@ def rebuild_instruction():
                 print(f'[[X]] Decryption failed: {e}')
     
     # Display
-    print('\n╔═══════════════════════════════════════╗')
-    print('║  RECONSTRUCTED INSTRUCTION           ║')
-    print('╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  RECONSTRUCTED INSTRUCTION')
+    print('='*47)
     
     # Pretty print SEAM fields if applicable
     if SEAMValidator.is_seam_compliant(instr):
@@ -2383,34 +2982,30 @@ def rebuild_instruction():
 
 def audit_logs():
     """CLI: View audit trail"""
-    print('\n╔═══════════════════════════════════════╗')
-    print('║  AUDIT TRAIL                         ║')
-    print('╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  AUDIT TRAIL')
+    print('='*47)
     
-    for fname in list_shards():
-        if fname.endswith('_manifest.json'):
-            try:
-                with open(shard_file_path(fname), 'r') as f:
-                    manifest = json.load(f)
+    for manifest in list_manifest_records():
+        try:
+            seam_badge = f' [SEAM: {manifest.get("seam_type")}]' if manifest.get('seam_compliant') else ''
+            print(f"\nInstruction: {manifest['instruction_id']}{seam_badge}")
+            print(f"Origin: {manifest.get('origin')} -> Destination: {manifest.get('destination')}")
+            
+            for entry in manifest.get('log', []):
+                print(f"  - {entry['event']}")
+                print(f"    Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(entry['timestamp']))}")
+                print(f"    Node: {entry.get('node_id', 'unknown')[:16]}...")
+                print(f"    Signature: {entry.get('signature', '')[:24]}...")
                 
-                seam_badge = f' [SEAM: {manifest.get("seam_type")}]' if manifest.get('seam_compliant') else ''
-                print(f"\nInstruction: {manifest['instruction_id']}{seam_badge}")
-                print(f"Origin: {manifest.get('origin')} -> Destination: {manifest.get('destination')}")
-                
-                for entry in manifest.get('log', []):
-                    print(f"  - {entry['event']}")
-                    print(f"    Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(entry['timestamp']))}")
-                    print(f"    Node: {entry.get('node_id', 'unknown')[:16]}...")
-                    print(f"    Signature: {entry.get('signature', '')[:24]}...")
-                    
-            except Exception as e:
-                print(f'[!] Error reading {fname}: {e}')
+        except Exception as e:
+            print(f'[!] Error reading manifest: {e}')
 
 def view_billing():
     """CLI: View billing report"""
-    print('\n╔═══════════════════════════════════════╗')
-    print('║  BILLING REPORT                      ║')
-    print('╚═══════════════════════════════════════╝')
+    print('\n' + '='*47)
+    print('  BILLING REPORT')
+    print('='*47)
     
     client_id = input('Client ID (or press Enter for all): ').strip()
     
@@ -2425,15 +3020,7 @@ def view_billing():
         print(f"Amount Due: ${report['amount_due_usd']:.2f} USD")
     else:
         # All clients
-        all_clients = set()
-        if os.path.exists(METERING_LOG):
-            with open(METERING_LOG, 'r') as f:
-                for line in f:
-                    try:
-                        event = json.loads(line)
-                        all_clients.add(event['client_id'])
-                    except:
-                        continue
+        all_clients = set(STORAGE_DB.list_metering_clients())
         
         total_revenue = 0
         for cid in all_clients:
@@ -2450,18 +3037,17 @@ def view_billing():
 def cli_menu():
     """Interactive CLI menu"""
     while True:
-        print('\n╔═══════════════════════════════════════╗')
-        print('║  ONESEAM ENTERPRISE NODE             ║')
-        print('╠═══════════════════════════════════════╣')
-        print('║  1. Node Status                      ║')
-        print('║  2. Send Financial Instruction       ║')
-        print('║  3. Monitor Received Instructions    ║')
-        print('║  4. Collect Shards Dynamically       ║')
-        print('║  5. Reconstruct Instruction          ║')
-        print('║  6. Audit Logs                       ║')
-        print('║  7. Billing Report                   ║')
-        print('║  8. Exit                             ║')
-        print('╚═══════════════════════════════════════╝')
+        print('\n' + '='*47)
+        print('  ONESEAM ENTERPRISE NODE')
+        print('='*47)
+        print('  1. Node Status')
+        print('  2. Send Financial Instruction')
+        print('  3. Monitor Received Instructions')
+        print('  4. Collect Shards Dynamically')
+        print('  5. Reconstruct Instruction')
+        print('  6. Audit Logs')
+        print('  7. Billing Report')
+        print('  8. Exit')
         
         choice = input('\nSelect option: ').strip()
         
@@ -2488,148 +3074,115 @@ def cli_menu():
             print('[!] Invalid option.')
 
 # ===== ENTERPRISE REST API =====
-def start_rest_api():
-    """Start enterprise REST API server"""
-    try:
-        from flask import Flask, request, jsonify, g
-        from functools import wraps
-    except ImportError:
-        print('[API] Flask not installed. API disabled.')
-        print('[API] Install: pip install flask')
+async def start_rest_api():
+    """Start enterprise REST API server (aiohttp)"""
+    if not AIOHTTP_AVAILABLE:
+        print('[API] aiohttp not installed. API disabled.')
         return
-    
     if not JWT_AVAILABLE and not ALLOW_LEGACY_API_KEYS:
         print('[API] PyJWT not installed and legacy API keys disabled.')
         return
-    
     if API_BIND not in ('127.0.0.1', 'localhost') and not TLS_ENABLED:
         print('[API] TLS is required for non-local bind.')
         return
-    
     if TLS_ENABLED and (not TLS_CERT_PATH or not TLS_KEY_PATH):
         print('[API] TLS enabled but cert/key not configured.')
         return
-    
     if not JWT_PUBLIC_KEY_CACHE and not ALLOW_LEGACY_API_KEYS:
         print('[API] No JWT public keys configured and legacy API keys disabled.')
         return
-    
-    app = Flask(__name__)
-    app.config['MAX_CONTENT_LENGTH'] = API_MAX_PAYLOAD_BYTES
-    
-    def _json_error(message: str, status: int, code: str):
-        payload = {
-            'error': message,
-            'error_code': code,
-            'request_id': g.request_id
-        }
-        return jsonify(payload), status
 
-    def _require_fields(data: Dict[str, Any], fields: List[str]) -> Optional[str]:
-        for f in fields:
-            if f not in data or data[f] in (None, ''):
-                return f
-        return None
-    
-    @app.before_request
-    def _request_id():
-        g.request_id = str(uuid_lib.uuid4())
+    @web.middleware
+    async def request_id_middleware(request, handler):
+        request['request_id'] = str(uuid_lib.uuid4())
         metric_inc('requests_total')
-    
-    @app.after_request
-    def _security_headers(response):
-        response.headers['X-Request-Id'] = g.request_id
+        try:
+            response = await handler(request)
+        except web.HTTPException as ex:
+            response = ex
+        response.headers['X-Request-Id'] = request['request_id']
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         if TLS_ENABLED:
             response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
         return response
-    
-    def require_auth(required_scopes: Optional[List[str]] = None,
-                     required_roles: Optional[List[str]] = None):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            if MTLS_CA_PATH and MTLS_ALLOWED_CNS:
-                client_cn = request.environ.get('SSL_CLIENT_S_DN_CN') or request.environ.get('SSL_CLIENT_S_DN', '')
-                if client_cn:
-                    if client_cn not in MTLS_ALLOWED_CNS and not any(cn in client_cn for cn in MTLS_ALLOWED_CNS):
-                        return _json_error('Forbidden', 403, 'mtls_cn_denied')
-                else:
-                    return _json_error('Forbidden', 403, 'mtls_cn_missing')
-            client = None
-            auth = request.headers.get('Authorization', '')
-            if auth.startswith('Bearer '):
-                token = auth.split(' ', 1)[1].strip()
-                try:
-                    claims = _verify_jwt(token)
-                except Exception:
-                    return _json_error('Unauthorized', 401, 'auth_invalid')
-                client = {
-                    'client_id': claims.get('sub'),
-                    'roles': claims.get('roles', []),
-                    'scopes': claims.get('scopes', []),
-                    'claims': claims
-                }
-            elif ALLOW_LEGACY_API_KEYS:
-                api_key = request.headers.get('X-API-Key')
-                if api_key and api_key in API_KEYS:
-                    legacy = API_KEYS[api_key]
-                    client = {
-                        'client_id': legacy.get('client_id'),
-                        'roles': legacy.get('roles', ['issuer']),
-                        'scopes': legacy.get('scopes', ['instruction:write', 'instruction:read'])
-                    }
-            if not client or not client.get('client_id'):
-                metric_inc('auth_failed_total')
-                return _json_error('Unauthorized', 401, 'auth_required')
-            
-            scopes = client.get('scopes', [])
-            if isinstance(scopes, str):
-                scopes = scopes.split()
-            roles = client.get('roles', [])
-            
-            if required_scopes:
-                for s in required_scopes:
-                    if s not in scopes:
-                        metric_inc('auth_failed_total')
-                        return _json_error('Forbidden', 403, 'missing_scope')
-            if required_roles:
-                ok = any(r in roles for r in required_roles)
-                if not ok:
-                    metric_inc('auth_failed_total')
-                    return _json_error('Forbidden', 403, 'missing_role')
-            
-            if not _rate_limit_ok(client['client_id'], request.path):
-                metric_inc('rate_limited_total')
-                return _json_error('Too Many Requests', 429, 'rate_limited')
-            
-            request.client = client
-            return f(*args, **kwargs)
-        return wrapper
 
-    def _idempotent_response(client_id: str):
-        key = request.headers.get('Idempotency-Key', '').strip()
-        if not key:
-            return None, None
-        entry = idempotency_get(client_id, key)
-        if entry:
-            return entry['payload'], entry['status']
-        return None, None
-    
-    @app.route('/health', methods=['GET'])
-    def health():
-        return jsonify({
+    app = web.Application(middlewares=[request_id_middleware], client_max_size=API_MAX_PAYLOAD_BYTES)
+
+    def json_error(request, status: int, code: str, message: str):
+        return web.json_response({'error': message, 'error_code': code, 'request_id': request['request_id']}, status=status)
+
+    async def ensure_auth(request, required_scopes=None, required_roles=None):
+        if MTLS_CA_PATH and MTLS_ALLOWED_CNS:
+            ssl_obj = request.transport.get_extra_info('ssl_object')
+            cert = ssl_obj.getpeercert() if ssl_obj else None
+            subject = cert.get('subject', []) if cert else []
+            cn = ''
+            for attrs in subject:
+                for k, v in attrs:
+                    if k == 'commonName':
+                        cn = v
+                        break
+            if not cn or (cn not in MTLS_ALLOWED_CNS and not any(x in cn for x in MTLS_ALLOWED_CNS)):
+                raise web.HTTPForbidden()
+        client = None
+        auth = request.headers.get('Authorization', '')
+        if auth.startswith('Bearer '):
+            token = auth.split(' ', 1)[1].strip()
+            try:
+                claims = _verify_jwt(token)
+            except Exception:
+                raise web.HTTPUnauthorized()
+            client = {
+                'client_id': claims.get('sub'),
+                'roles': claims.get('roles', []),
+                'scopes': claims.get('scopes', []),
+                'claims': claims
+            }
+        elif ALLOW_LEGACY_API_KEYS:
+            api_key = request.headers.get('X-API-Key')
+            if api_key and api_key in API_KEYS:
+                legacy = API_KEYS[api_key]
+                client = {
+                    'client_id': legacy.get('client_id'),
+                    'roles': legacy.get('roles', ['issuer']),
+                    'scopes': legacy.get('scopes', ['instruction:write', 'instruction:read'])
+                }
+        if not client or not client.get('client_id'):
+            metric_inc('auth_failed_total')
+            raise web.HTTPUnauthorized()
+        scopes = client.get('scopes', [])
+        if isinstance(scopes, str):
+            scopes = scopes.split()
+        roles = client.get('roles', [])
+        if required_scopes:
+            for s in required_scopes:
+                if s not in scopes:
+                    metric_inc('auth_failed_total')
+                    raise web.HTTPForbidden()
+        if required_roles:
+            ok = any(r in roles for r in required_roles)
+            if not ok:
+                metric_inc('auth_failed_total')
+                raise web.HTTPForbidden()
+        if not _rate_limit_ok(client['client_id'], request.path):
+            metric_inc('rate_limited_total')
+            raise web.HTTPTooManyRequests()
+        request['client'] = client
+        return client
+
+    async def health(request):
+        return web.json_response({
             'status': 'healthy',
             'service': 'Oneseam Enterprise Infrastructure',
             'version': '2.0.0',
             'seam_version': '1.0',
             'node_id': node_id,
-            'request_id': g.request_id
+            'request_id': request['request_id']
         })
 
-    @app.route('/ready', methods=['GET'])
-    def ready():
+    async def ready(request):
         ok = True
         reasons = []
         if TLS_ENABLED and (not TLS_CERT_PATH or not TLS_KEY_PATH):
@@ -2639,183 +3192,141 @@ def start_rest_api():
             ok = False
             reasons.append('jwt_keys_missing')
         status = 'ready' if ok else 'not_ready'
-        return jsonify({
-            'status': status,
-            'reasons': reasons,
-            'request_id': g.request_id
-        }), (200 if ok else 503)
+        return web.json_response({'status': status, 'reasons': reasons, 'request_id': request['request_id']}, status=200 if ok else 503)
 
-    @app.route('/metrics', methods=['GET'])
-    def metrics():
+    async def metrics(request):
         if not METRICS_ENABLED:
-            return _json_error('Metrics disabled', 404, 'metrics_disabled')
-        return jsonify({
-            'request_id': g.request_id,
-            'metrics': metrics_snapshot()
-        })
-    
-    @app.route('/v1/seam/payment_obligation', methods=['POST'])
-    @require_auth(required_scopes=['seam:write'], required_roles=['issuer', 'admin'])
-    def create_payment_obligation_api():
-        """Create SEAM Payment Obligation"""
-        try:
-            data = request.json
-            if not isinstance(data, dict):
-                return _json_error('Invalid payload', 400, 'invalid_payload')
-            missing = _require_fields(data, ['amount', 'creditor', 'debtor'])
-            if missing:
-                return _json_error(f'Missing field: {missing}', 400, 'missing_fields')
-            try:
-                if Decimal(str(data['amount'])) <= 0:
-                    return _json_error('Amount must be positive', 400, 'invalid_amount')
-            except Exception:
-                return _json_error('Invalid amount', 400, 'invalid_amount')
-            
-            cached, status = _idempotent_response(request.client['client_id'])
-            if cached:
-                return jsonify(cached), status
-            
-            instr = create_seam_payment_obligation(
-                amount=data['amount'],
-                currency=data.get('currency', 'USD'),
-                creditor=data['creditor'],
-                debtor=data['debtor'],
-                due_date=data.get('due_date'),
-                terms=data.get('terms'),
-                reference=data.get('reference'),
-                interest_rate=data.get('interest_rate'),
-                jurisdiction=data.get('jurisdiction')
-            )
-            
-            # Add origin/destination for routing
-            instr['origin'] = request.client['client_id']
-            instr['destination'] = data['creditor']
-            append_audit_event('api_seam_payment_obligation', request.client['client_id'],
-                               instr['instruction_id'], request_id=g.request_id)
-            metric_inc('instructions_created_total')
-            
-            # Distribute
-            k, n = DEFAULT_QUORUM_K, DEFAULT_QUORUM_N
-            if not SSS_AVAILABLE:
-                k = n
-            instr_json = json.dumps(instr)
-            
-            if SSS_AVAILABLE:
-                encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
-                manifest = create_instruction_manifest(instr, [], encrypted_payload_b64=encrypted_b64,
-                                                      shard_dicts=shard_dicts, quorum_k=k, quorum_n=n)
-                manifest['shards'] = [f'{instr["instruction_id"]}_shard{s["index"]}_v{r+1}.json'
-                                     for s in shard_dicts for r in range(3)]
-                distribute_shards_smart(shard_dicts, instr['instruction_id'], data['creditor'],
-                                       manifest, k, n, use_sss=True)
-            else:
-                shards = split_text(instr_json, n)
-                manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
-                manifest['shards'] = [f'{instr["instruction_id"]}_shard{i+1}_v{r+1}.json'
-                                     for i in range(n) for r in range(3)]
-                distribute_shards_smart(shards, instr['instruction_id'], data['creditor'],
-                                       manifest, k, n, use_sss=False)
-            
-            payload = {
-                'instruction_id': instr['instruction_id'],
-                'seam_type': instr['seam_type'],
-                'status': 'dispatched',
-                'amount': instr['amount'],
-                'currency': instr['currency'],
-                'quorum': f'{k}-of-{n}',
-                'request_id': g.request_id
-            }
-            idem_key = request.headers.get('Idempotency-Key', '').strip()
-            if idem_key:
-                idempotency_put(request.client['client_id'], idem_key, payload, 201)
-            return jsonify(payload), 201
-            
-        except Exception as e:
-            log_event('ERROR', 'api_error', path=request.path, error=str(e))
-            return _json_error(str(e), 400, 'bad_request')
-    
-    @app.route('/v1/instructions', methods=['POST'])
-    @require_auth(required_scopes=['instruction:write'], required_roles=['issuer', 'admin'])
-    def submit_instruction():
-        """Submit financial instruction (legacy format)"""
-        data = request.json
-        
-        if not isinstance(data, dict):
-            return _json_error('Invalid payload', 400, 'invalid_payload')
-        missing = _require_fields(data, ['payload', 'destination'])
-        if missing:
-            return _json_error(f'Missing field: {missing}', 400, 'missing_fields')
-        if not isinstance(data.get('payload'), str) or not data['payload'].strip():
-            return _json_error('Invalid payload', 400, 'invalid_payload')
-        if len(data['payload']) > API_MAX_PAYLOAD_BYTES:
-            return _json_error('Payload too large', 413, 'payload_too_large')
+            return json_error(request, 404, 'metrics_disabled', 'Metrics disabled')
+        return web.json_response({'request_id': request['request_id'], 'metrics': metrics_snapshot()})
 
-        cached, status = _idempotent_response(request.client['client_id'])
+    async def create_payment_obligation_api(request):
+        await ensure_auth(request, required_scopes=['seam:write'], required_roles=['issuer', 'admin'])
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = PaymentObligationRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        if Decimal(str(data['amount'])) <= 0:
+            return json_error(request, 400, 'invalid_amount', 'Amount must be positive')
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
         if cached:
-            return jsonify(cached), status
-        
-        # Create instruction
+            return web.json_response(cached['payload'], status=cached['status'])
+        instr = create_seam_payment_obligation(
+            amount=data['amount'],
+            currency=data.get('currency', 'USD'),
+            creditor=data['creditor'],
+            debtor=data['debtor'],
+            due_date=data.get('due_date'),
+            terms=data.get('terms'),
+            reference=data.get('reference'),
+            interest_rate=data.get('interest_rate'),
+            jurisdiction=data.get('jurisdiction')
+        )
+        instr['origin'] = request['client']['client_id']
+        instr['destination'] = data['creditor']
+        append_audit_event('api_seam_payment_obligation', request['client']['client_id'], instr['instruction_id'], request_id=request['request_id'])
+        metric_inc('instructions_created_total')
+        k, n = DEFAULT_QUORUM_K, DEFAULT_QUORUM_N
+        if not SSS_AVAILABLE:
+            k = n
+        instr_json = json.dumps(instr)
+        if SSS_AVAILABLE:
+            encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
+            manifest = create_instruction_manifest(instr, [], encrypted_payload_b64=encrypted_b64,
+                                                  shard_dicts=shard_dicts, quorum_k=k, quorum_n=n)
+            manifest['shards'] = [f"{instr['instruction_id']}_shard{s['index']}_v{r+1}.json" for s in shard_dicts for r in range(3)]
+            distribute_shards_smart(shard_dicts, instr['instruction_id'], data['creditor'], manifest, k, n, use_sss=True)
+        else:
+            shards = split_text(instr_json, n)
+            manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
+            manifest['shards'] = [f"{instr['instruction_id']}_shard{i+1}_v{r+1}.json" for i in range(n) for r in range(3)]
+            distribute_shards_smart(shards, instr['instruction_id'], data['creditor'], manifest, k, n, use_sss=False)
+        payload = {
+            'instruction_id': instr['instruction_id'],
+            'seam_type': instr['seam_type'],
+            'status': 'dispatched',
+            'amount': instr['amount'],
+            'currency': instr['currency'],
+            'quorum': f'{k}-of-{n}',
+            'request_id': request['request_id']
+        }
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 201)
+        return web.json_response(payload, status=201)
+
+    async def submit_instruction(request):
+        await ensure_auth(request, required_scopes=['instruction:write'], required_roles=['issuer', 'admin'])
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = InstructionRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        if not data.get('payload') or not data.get('destination'):
+            return json_error(request, 400, 'missing_fields', 'Missing payload or destination')
+        if len(data['payload']) > API_MAX_PAYLOAD_BYTES:
+            return json_error(request, 413, 'payload_too_large', 'Payload too large')
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
         instr = create_financial_instruction(
             payload=data['payload'],
-            origin=request.client['client_id'],
+            origin=request['client']['client_id'],
             destination=data['destination'],
             encryption_key=data.get('encryption_key'),
             jurisdiction=data.get('jurisdiction'),
             data_region=data.get('data_region'),
             compliance_frameworks=data.get('compliance_frameworks')
         )
-        
         k, n = DEFAULT_QUORUM_K, DEFAULT_QUORUM_N
         if not SSS_AVAILABLE:
             k = n
         instr_json = json.dumps(instr)
-        
         if SSS_AVAILABLE:
             encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
             manifest = create_instruction_manifest(instr, [], encrypted_payload_b64=encrypted_b64,
                                                   shard_dicts=shard_dicts, quorum_k=k, quorum_n=n)
-            manifest['shards'] = [f'{instr["instruction_id"]}_shard{s["index"]}_v{r+1}.json'
-                                 for s in shard_dicts for r in range(3)]
-            distribute_shards_smart(shard_dicts, instr['instruction_id'], data['destination'],
-                                   manifest, k, n, use_sss=True)
+            manifest['shards'] = [f"{instr['instruction_id']}_shard{s['index']}_v{r+1}.json" for s in shard_dicts for r in range(3)]
+            distribute_shards_smart(shard_dicts, instr['instruction_id'], data['destination'], manifest, k, n, use_sss=True)
         else:
             shards = split_text(instr_json, n)
             manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
-            manifest['shards'] = [f'{instr["instruction_id"]}_shard{i+1}_v{r+1}.json'
-                                 for i in range(n) for r in range(3)]
-            distribute_shards_smart(shards, instr['instruction_id'], data['destination'],
-                                   manifest, k, n, use_sss=False)
-        
-        append_audit_event('api_instruction_submit', request.client['client_id'],
-                           instr['instruction_id'], request_id=g.request_id)
+            manifest['shards'] = [f"{instr['instruction_id']}_shard{i+1}_v{r+1}.json" for i in range(n) for r in range(3)]
+            distribute_shards_smart(shards, instr['instruction_id'], data['destination'], manifest, k, n, use_sss=False)
+        append_audit_event('api_instruction_submit', request['client']['client_id'], instr['instruction_id'], request_id=request['request_id'])
         metric_inc('instructions_created_total')
         payload = {
             'instruction_id': instr['instruction_id'],
             'status': 'dispatched',
             'shards': n * 3,
             'quorum': f'{k}-of-{n}',
-            'request_id': g.request_id
+            'request_id': request['request_id']
         }
         idem_key = request.headers.get('Idempotency-Key', '').strip()
         if idem_key:
-            idempotency_put(request.client['client_id'], idem_key, payload, 201)
-        return jsonify(payload), 201
-    
-    @app.route('/v1/instructions/<instruction_id>', methods=['GET'])
-    @require_auth(required_scopes=['instruction:read'], required_roles=['receiver', 'auditor', 'admin'])
-    def get_instruction(instruction_id):
-        """Check instruction status and reconstruct if ready"""
-        collect_shards_dynamically(instruction_id, max_attempts=2)
+            idempotency_put(request['client']['client_id'], idem_key, payload, 201)
+        return web.json_response(payload, status=201)
+
+    async def get_instruction(request):
+        await ensure_auth(request, required_scopes=['instruction:read'], required_roles=['receiver', 'auditor', 'admin'])
+        instruction_id = request.match_info.get('instruction_id')
+        await collect_shards_dynamically_async(instruction_id, max_attempts=2)
         result = reconstruct_with_quorum(instruction_id)
-        
         if result:
             response = {
                 'instruction_id': instruction_id,
                 'status': 'reconstructed',
                 'quorum': 'achieved',
-                'request_id': g.request_id
+                'request_id': request['request_id']
             }
-            
             if SEAMValidator.is_seam_compliant(result):
                 response['seam_compliant'] = True
                 response['seam_type'] = result.get('seam_type')
@@ -2825,97 +3336,90 @@ def start_rest_api():
                 response['debtor'] = result.get('debtor')
             else:
                 response['payload'] = result.get('payload') if not result.get('encrypted') else '[encrypted]'
-            
-            return jsonify(response)
-        else:
-            return jsonify({
-                'instruction_id': instruction_id,
-                'status': 'pending',
-                'quorum': 'not_achieved',
-                'request_id': g.request_id
-            }), 202
-    
-    @app.route('/v1/billing', methods=['GET'])
-    @require_auth(required_scopes=['billing:read'], required_roles=['auditor', 'admin'])
-    def billing():
-        """Get billing report"""
-        start = int(request.args.get('start', 0))
-        end = int(request.args.get('end', time.time()))
-        
-        report = get_billing_report(request.client['client_id'], start, end)
-        report['request_id'] = g.request_id
-        return jsonify(report)
-    
-    print(f'[API] REST API starting on {API_BIND}:{API_PORT}')
-    if API_BIND not in ('127.0.0.1', 'localhost'):
-        print('[API] WARNING: Bind address is public. Use TLS termination in production.')
-    print(f'[API] SEAM Protocol v1.0 enabled')
-    print(f'[API] Endpoints:')
-    print(f'[API]   POST   /v1/seam/payment_obligation')
-    print(f'[API]   POST   /v1/instructions')
-    print(f'[API]   GET    /v1/instructions/<id>')
-    print(f'[API]   GET    /v1/billing')
-    
+            return web.json_response(response)
+        return web.json_response({
+            'instruction_id': instruction_id,
+            'status': 'pending',
+            'quorum': 'not_achieved',
+            'request_id': request['request_id']
+        }, status=202)
+
+    async def billing(request):
+        await ensure_auth(request, required_scopes=['billing:read'], required_roles=['auditor', 'admin'])
+        start = int(request.query.get('start', 0))
+        end = int(request.query.get('end', time.time()))
+        report = get_billing_report(request['client']['client_id'], start, end)
+        report['request_id'] = request['request_id']
+        return web.json_response(report)
+
+    app.add_routes([
+        web.get('/health', health),
+        web.get('/ready', ready),
+        web.get('/metrics', metrics),
+        web.post('/v1/seam/payment_obligation', create_payment_obligation_api),
+        web.post('/v1/instructions', submit_instruction),
+        web.get('/v1/instructions/{instruction_id}', get_instruction),
+        web.get('/v1/billing', billing),
+    ])
+
     ssl_context = None
     if TLS_ENABLED:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
         if MTLS_CA_PATH:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(TLS_CERT_PATH, TLS_KEY_PATH)
-            ctx.load_verify_locations(MTLS_CA_PATH)
-            ctx.verify_mode = ssl.CERT_REQUIRED
-            ssl_context = ctx
-        else:
-            ssl_context = (TLS_CERT_PATH, TLS_KEY_PATH)
-    log_event('INFO', 'api_start', bind=API_BIND, port=API_PORT, tls=bool(ssl_context))
-    app.run(host=API_BIND, port=API_PORT, debug=False, threaded=True, ssl_context=ssl_context)
+            ssl_context.load_verify_locations(MTLS_CA_PATH)
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
 
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, API_BIND, API_PORT, ssl_context=ssl_context)
+    await site.start()
+    log_event('INFO', 'api_start', bind=API_BIND, port=API_PORT, tls=bool(ssl_context))
 # ===== MAIN ENTRY =====
 if __name__ == '__main__':
     print("""
-╔═══════════════════════════════════════════════════════════════╗
-║  ██████╗ ███╗   ██╗███████╗███████╗███████╗ █████╗ ███╗   ███╗║
-║ ██╔═══██╗████╗  ██║██╔════╝██╔════╝██╔════╝██╔══██╗████╗ ████║║
-║ ██║   ██║██╔██╗ ██║█████╗  ███████╗█████╗  ███████║██╔████╔██║║
-║ ██║   ██║██║╚██╗██║██╔══╝  ╚════██║██╔══╝  ██╔══██║██║╚██╔╝██║║
-║ ╚██████╔╝██║ ╚████║███████╗███████║███████╗██║  ██║██║ ╚═╝ ██║║
-║  ╚═════╝ ╚═╝  ╚═══╝╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝║                                                      ║
-║                                                               ║
-║          Enterprise Cryptographic Messaging v2.0             ║
-║        Resilient Financial Settlement Infrastructure         ║
-║              SEAM Protocol v1.0 (enabled)                    ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝
+===============================================
+  ONESEAM ENTERPRISE v2.0
+  Resilient Financial Settlement Messaging
+  SEAM Protocol v1.0 (enabled)
+===============================================
     """)
-    
+
     # Register shutdown handlers
     signal.signal(signal.SIGINT, handle_shutdown)
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, handle_shutdown)
-    
-    # Initialize
-    get_node_id()
-    ensure_storage()
-    
-    print(f'[INIT] Node ID: {node_id[:16]}...')
-    print(f'[INIT] Storage: {STORAGE_DIR}')
-    print(f'[INIT] SEAM Protocol: v1.0')
-    print(f'[INIT] Supported types: PAYMENT_OBLIGATION, INVOICE, LETTER_OF_CREDIT, PURCHASE_ORDER')
-    
-    # Start P2P network
-    threading.Thread(target=broadcast_presence, daemon=True).start()
-    threading.Thread(target=listen_broadcast, daemon=True).start()
-    threading.Thread(target=server_thread, daemon=True).start()
-    threading.Thread(target=prune_neighbors, daemon=True).start()
-    if BLIND_RELAY_ENABLED:
-        threading.Thread(target=relay_thread, daemon=True).start()
-        print('[INIT] Blind Relay (Repasse Cego) enabled')
-    
-    # Check if API mode requested
-    if len(sys.argv) > 1 and sys.argv[1] == 'api':
-        print('[MODE] Starting in API mode (REST server)')
-        start_rest_api()
-    else:
-        print('[MODE] Starting in CLI mode')
-        print('[INFO] For API mode, run: python oneseam_enterprise.py api')
-        time.sleep(2)
-        cli_menu()
+
+    async def main_async():
+        global ASYNC_LOOP
+        ASYNC_LOOP = asyncio.get_running_loop()
+        get_node_id()
+        ensure_storage()
+        try_upnp()
+
+        print(f'[INIT] Node ID: {node_id[:16]}...')
+        print(f'[INIT] Storage: db_backend={DB_BACKEND}')
+        print(f'[INIT] SEAM Protocol: v1.0')
+        print(f'[INIT] Supported types: PAYMENT_OBLIGATION, INVOICE, LETTER_OF_CREDIT, PURCHASE_ORDER')
+
+        tasks = [
+            asyncio.create_task(broadcast_presence_async()),
+            asyncio.create_task(listen_broadcast_async()),
+            asyncio.create_task(start_p2p_server()),
+            asyncio.create_task(prune_neighbors_async()),
+            asyncio.create_task(bootstrap_seeds())
+        ]
+        if BLIND_RELAY_ENABLED:
+            tasks.append(asyncio.create_task(relay_worker()))
+            print('[INIT] Blind Relay (Repasse Cego) enabled')
+
+        if len(sys.argv) > 1 and sys.argv[1] == 'api':
+            print('[MODE] Starting in API mode (REST server)')
+            await start_rest_api()
+            await asyncio.Event().wait()
+        else:
+            print('[MODE] Starting in CLI mode')
+            print('[INFO] For API mode, run: python oneseam_enterprise.py api')
+            await asyncio.to_thread(cli_menu)
+
+    asyncio.run(main_async())

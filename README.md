@@ -18,6 +18,12 @@ Oneseam operates exclusively on **transaction instructions (financial messages)*
 
 - **Data sovereignty**: Region-aware routing for GDPR, LGPD, and jurisdictional compliance.
 
+- **Transport security**: TLS for REST, optional mTLS for REST and P2P.
+
+- **Shard integrity**: Optional Ed25519 shard signing with verification.
+
+- **Audit trail**: Immutable hash-chained audit log stored in the DB.
+
 ## The SEAM Protocol
 
 **SEAM (Settlement Evidence & Agreement Message)** is the logical layer that transforms Oneseam from encrypted messaging into economic infrastructure.
@@ -29,7 +35,7 @@ Instead of transferring money, SEAM creates a **verifiable distributed financial
 - Cryptographic integrity hash
 - Multi-node witness via shard distribution
 
-Multiple independent nodes witness the instruction's existence. Only a quorum can reconstruct it. **No single company, server, or bank needs to be trusted in isolation** — the network itself proves the commitment was issued.
+Multiple independent nodes witness the instruction's existence. Only a quorum can reconstruct it. **No single company, server, or bank needs to be trusted in isolation** - the network itself proves the commitment was issued.
 
 ### Economic Function
 
@@ -38,13 +44,13 @@ SEAM operates as a **programmable letter of credit**. The receiving party gains 
 **Example use case:**
 ```
 Supplier receives SEAM instruction: "Pay $500k upon delivery"
-→ Supplier uses SEAM as collateral to secure working capital loan
-→ Supplier manufactures goods
-→ Delivery triggers settlement (local, within institutions)
-→ SEAM obligation fulfilled
+-> Supplier uses SEAM as collateral to secure working capital loan
+-> Supplier manufactures goods
+-> Delivery triggers settlement (local, within institutions)
+-> SEAM obligation fulfilled
 ```
 
-The instruction itself becomes tradeable, financeable, and programmable — without moving funds through Oneseam.
+The instruction itself becomes tradeable, financeable, and programmable - without moving funds through Oneseam.
 
 ## Architecture
 ```
@@ -56,9 +62,9 @@ Origin Institution                    Destination Institution
        |  (on-grid + off-grid)                 |
 ```
 
-- **No custody of funds** – Messages only
-- **No payment processing** – Instruction delivery infrastructure
-- **No financial intermediary** – Peer-to-peer messaging fabric
+- **No custody of funds** - Messages only
+- **No payment processing** - Instruction delivery infrastructure
+- **No financial intermediary** - Peer-to-peer messaging fabric
 
 ## Installation
 ```bash
@@ -75,6 +81,19 @@ transport_mode: HYBRID   # ON_GRID | OFF_GRID | HYBRID
 region: "EU"         # Data sovereignty region
 ```
 
+### Storage (DB)
+```yaml
+db_backend: "sqlite"   # sqlite | postgres
+db_path: "oneseam.db"
+db_dsn: ""             # postgres DSN if backend=postgres
+```
+
+### Bootstrap / NAT
+```yaml
+seed_nodes: ["1.2.3.4:5001"]
+upnp_enabled: false
+```
+
 ### Security (REST API)
 ```yaml
 tls_enabled: true
@@ -86,6 +105,23 @@ jwt_issuer: "oneseam"
 jwt_audience: "oneseam-api"
 jwt_public_keys:
   - "/path/to/jwt_public_key.pem"
+```
+
+### Security (P2P)
+```yaml
+p2p_tls_enabled: true
+p2p_tls_cert_path: "/path/to/cert.pem"
+p2p_tls_key_path: "/path/to/key.pem"
+p2p_mtls_ca_path: "/path/to/ca.pem"
+p2p_mtls_required: true
+```
+
+### Shard Signing
+```yaml
+shard_signature_required: true
+shard_signing_private_key: "shard_signing_priv.pem"
+shard_signing_public_key: "shard_signing_pub.pem"
+trusted_node_pubkeys: {}  # {NODE_ID: "-----BEGIN PUBLIC KEY-----..."}
 ```
 
 ## Usage
@@ -101,10 +137,14 @@ python oneseam_enterprise.py api
 ```
 
 **Endpoints:**
-- `POST /v1/instructions` – Submit instruction
-- `GET /v1/instructions/<id>` – Retrieve / reconstruct instruction
-- `POST /v1/instructions/<id>/release` – Generate Access Release Token (ART)
-- `GET /v1/billing` – Billing report
+- `GET /health` - Health check
+- `GET /ready` - Readiness check
+- `GET /metrics` - Metrics snapshot (if enabled)
+- `POST /v1/seam/payment_obligation` - Create SEAM payment obligation
+- `POST /v1/instructions` - Submit instruction
+- `GET /v1/instructions/<id>` - Retrieve / reconstruct instruction
+- `POST /v1/instructions/<id>/release` - Generate Access Release Token (ART)
+- `GET /v1/billing` - Billing report
 
 **Authentication:** `Authorization: Bearer <JWT>` (default). `X-API-Key` is deprecated.
 
@@ -114,12 +154,15 @@ Enterprise-first: software licensing, support, and per-instruction volume billin
 
 ## Dependencies
 
-- `cryptography` – AES-256-GCM payload encryption
-- `pycryptodome` – Shamir Secret Sharing (zero-knowledge sharding)
-- `flask` – REST API
-- `pyyaml` – Configuration
-- `PyJWT` ? JWT authentication
+- `cryptography` - AES-256-GCM payload encryption
+- `pycryptodome` - Shamir Secret Sharing (zero-knowledge sharding)
+- `aiohttp` - REST API
+- `pyyaml` - Configuration
+- `PyJWT` - JWT authentication
+- `pydantic` - Schema validation
+- `psycopg2-binary` - PostgreSQL backend (optional)
+- `miniupnpc` - NAT traversal (optional)
 
 ## License
 
-Proprietary – Oneseam Enterprise
+Proprietary - Oneseam Enterprise
