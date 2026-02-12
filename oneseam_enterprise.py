@@ -38,6 +38,7 @@ from typing import List, Optional, Dict, Tuple, Any, Literal
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
+from itertools import combinations
 
 # Shamir Secret Sharing (PyCryptodome)
 try:
@@ -1639,6 +1640,21 @@ def reconstruct_instruction_from_shards(encrypted_b64: str, shard_dicts: List[Di
     payload_bytes = reconstruct_from_sss(encrypted_blob, shares)
     return payload_bytes.decode('utf-8')
 
+def parse_reconstructed_instruction(instr_json: str) -> Dict[str, Any]:
+    """
+    Parse reconstructed instruction payload with strict validation.
+    Supports normal JSON object and double-encoded JSON string payloads.
+    """
+    payload = (instr_json or '').strip()
+    if not payload:
+        raise ValueError('empty reconstructed payload')
+    obj = json.loads(payload)
+    if isinstance(obj, str):
+        obj = json.loads(obj)
+    if not isinstance(obj, dict):
+        raise ValueError('reconstructed payload is not a JSON object')
+    return obj
+
 def print_status():
     """Display node status"""
     print('\n' + '='*47)
@@ -1884,11 +1900,19 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
         
         print(f'[QUORUM] [OK] Achieved ({len(available_shards)}/{k} SSS shards)')
         
-        try:
-            instr_json = reconstruct_instruction_from_shards(encrypted_b64, available_shards[:k])
-            instruction = json.loads(instr_json)
-        except Exception as e:
-            print(f'[QUORUM] [X] SSS reconstruction failed: {e}')
+        instruction = None
+        last_error = None
+        # Try every k-of-n combination to tolerate one bad or stale shard.
+        for combo in combinations(available_shards, int(k)):
+            try:
+                instr_json = reconstruct_instruction_from_shards(encrypted_b64, list(combo))
+                instruction = parse_reconstructed_instruction(instr_json)
+                break
+            except Exception as e:
+                last_error = e
+                continue
+        if instruction is None:
+            print(f'[QUORUM] [X] SSS reconstruction failed: {last_error}')
             return None
     else:
         # Legacy mode
@@ -1923,7 +1947,7 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
         
         try:
             instr_json = ''.join(reconstruction_data)
-            instruction = json.loads(instr_json)
+            instruction = parse_reconstructed_instruction(instr_json)
         except Exception as e:
             print(f'[QUORUM] [X] Reconstruction failed: {e}')
             return None
