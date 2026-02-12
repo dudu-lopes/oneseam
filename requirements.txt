@@ -6,3 +6,4 @@ aiohttp>=3.9.0
 pydantic>=2.6.0
 psycopg2-binary>=2.9.9
 miniupnpc>=2.2.2
+web3>=6.15.1

@@ -1,19 +1,17 @@
 """
-Oneseam Enterprise - Resilient Cryptographic Messaging Infrastructure
+Oneseam Enterprise - P2P OTC Trading with Zero-Knowledge Privacy
 Version: 2.0.0
 
-Enterprise-grade P2P messaging system for financial settlement instructions.
+Enterprise-grade P2P OTC infrastructure with privacy-preserving transport.
 - Byzantine fault-tolerant (configurable k-of-n quorum)
 - Shamir Secret Sharing (zero-knowledge sharding)
-- SEAM Protocol (Settlement Evidence & Agreement Message)
+- RFQ/Trade lifecycle with non-custodial escrow integration
 - Blind Relay (Repasse Cego) - nodes accept and relay shards toward destination
 - AES-256-GCM encryption
-- Cryptographic metering with Access Release Token (ART)
 - On-grid / off-grid mesh network capable
-- Data sovereignty and compliance metadata
 - REST API for enterprise integration
 
-No custody of funds. Messages only. Compliance-native.
+Non-custodial by design: the node never signs or holds client private keys.
 """
 
 import os
@@ -33,11 +31,7 @@ import hmac
 import hashlib
 import uuid as uuid_lib
 from hashlib import sha256
-from getpass import getpass
 from typing import List, Optional, Dict, Tuple, Any, Literal
-from datetime import datetime, timedelta
-from decimal import Decimal
-from enum import Enum
 from itertools import combinations
 
 # Shamir Secret Sharing (PyCryptodome)
@@ -81,6 +75,13 @@ try:
 except ImportError:
     AIOHTTP_AVAILABLE = False
 
+# Web3 (EVM escrow integration)
+try:
+    from web3 import Web3
+    WEB3_AVAILABLE = True
+except ImportError:
+    WEB3_AVAILABLE = False
+
 # Pydantic validation
 try:
     from pydantic import BaseModel, ValidationError, Field
@@ -90,27 +91,6 @@ except ImportError:
     PYDANTIC_AVAILABLE = False
 
 if PYDANTIC_AVAILABLE:
-    class PaymentObligationRequest(BaseModel):
-        model_config = ConfigDict(extra='forbid')
-        amount: float
-        currency: str = 'USD'
-        creditor: str
-        debtor: str
-        due_date: Optional[int] = None
-        terms: Optional[str] = None
-        reference: Optional[str] = None
-        interest_rate: Optional[float] = None
-        jurisdiction: Optional[str] = None
-    
-    class InstructionRequest(BaseModel):
-        model_config = ConfigDict(extra='forbid')
-        payload: str
-        destination: str
-        encryption_key: Optional[str] = None
-        jurisdiction: Optional[str] = None
-        data_region: Optional[str] = None
-        compliance_frameworks: Optional[List[str]] = None
-    
     class P2PStoreShard(BaseModel):
         model_config = ConfigDict(extra='forbid')
         cmd: Literal['STORE_SHARD']
@@ -156,6 +136,46 @@ if PYDANTIC_AVAILABLE:
         country_code: Optional[str] = ''
         served_destinations: List[str] = Field(default_factory=list)
         node_signing_pub: Optional[str] = ''
+
+    class WalletBindRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        wallet_address: str
+        chain_id: Optional[int] = None
+
+    class OTCRFQCreateRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        maker_wallet: str
+        base_asset: str
+        quote_asset: str
+        base_amount: float
+        quote_amount: float
+        maker_side: Literal['buy', 'sell'] = 'sell'
+        taker_client_id: Optional[str] = None
+        expires_in_seconds: int = 900
+        metadata: Optional[Dict[str, Any]] = None
+        private_terms: Optional[Dict[str, Any]] = None
+
+    class OTCRFQAcceptRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        taker_wallet: str
+
+    class OTCTradeCreateRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        buyer_client_id: str
+        buyer_wallet: str
+        seller_client_id: str
+        seller_wallet: str
+        base_asset: str
+        quote_asset: str
+        base_amount: float
+        quote_amount: float
+        metadata: Optional[Dict[str, Any]] = None
+        private_terms: Optional[Dict[str, Any]] = None
+
+    class OTCTradeActionRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        tx_hash: str
+        escrow_trade_ref: Optional[str] = None
 
 def derive_key_from_password(password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
     """Derive AES-256 key from password using PBKDF2HMAC"""
@@ -208,461 +228,6 @@ def decrypt_payload_aes256(data: str, password: str) -> str:
 def generate_dna_hash(data: str) -> str:
     """Generate SHA-256 hash for integrity verification"""
     return sha256(data.encode()).hexdigest()
-
-# ===== SEAM PROTOCOL (Settlement Evidence & Agreement Message) =====
-
-class SEAMType(Enum):
-    """Standard SEAM message types"""
-    PAYMENT_OBLIGATION = "PAYMENT_OBLIGATION"
-    INVOICE = "INVOICE"
-    LETTER_OF_CREDIT = "LETTER_OF_CREDIT"
-    PURCHASE_ORDER = "PURCHASE_ORDER"
-    DELIVERY_CONFIRMATION = "DELIVERY_CONFIRMATION"
-    CUSTOM = "CUSTOM"
-
-class SEAMValidator:
-    """
-    SEAM Protocol Validator
-    
-    Ensures messages follow Settlement Evidence & Agreement Message standard.
-    SEAM transforms encrypted messages into economically interpretable obligations.
-    """
-    
-    # ISO 4217 currency codes (subset - expand as needed)
-    VALID_CURRENCIES = {
-        'USD', 'EUR', 'BRL', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 
-        'CNY', 'INR', 'MXN', 'ZAR', 'KRW', 'SGD', 'HKD'
-    }
-    
-    # Required fields for SEAM-compliant messages
-    REQUIRED_FIELDS = {
-        'instruction_id',
-        'seam_type',
-        'amount',
-        'currency',
-        'creditor',
-        'debtor',
-        'timestamp',
-        'integrity_hash'
-    }
-    
-    # Optional but recommended fields
-    OPTIONAL_FIELDS = {
-        'due_date',
-        'terms',
-        'reference',
-        'jurisdiction',
-        'dispute_resolution',
-        'collateral',
-        'interest_rate',
-        'penalties'
-    }
-    
-    @classmethod
-    def validate(cls, instruction: Dict) -> Tuple[bool, Optional[str]]:
-        """
-        Validate if instruction is SEAM-compliant
-        
-        Returns:
-            (is_valid, error_message)
-        """
-        # Check required fields
-        missing = cls.REQUIRED_FIELDS - set(instruction.keys())
-        if missing:
-            return False, f"Missing required SEAM fields: {missing}"
-        
-        # Validate SEAM type
-        seam_type = instruction.get('seam_type')
-        try:
-            SEAMType(seam_type)
-        except ValueError:
-            return False, f"Invalid SEAM type: {seam_type}"
-        
-        # Validate amount
-        try:
-            amount = Decimal(str(instruction['amount']))
-            if amount <= 0:
-                return False, "Amount must be positive"
-        except:
-            return False, "Invalid amount format"
-        
-        # Validate currency
-        currency = instruction.get('currency', '').upper()
-        if currency not in cls.VALID_CURRENCIES:
-            return False, f"Invalid currency: {currency} (not in ISO 4217)"
-        
-        # Validate due_date if present
-        if 'due_date' in instruction:
-            try:
-                due_date = int(instruction['due_date'])
-                timestamp = int(instruction['timestamp'])
-            except Exception:
-                return False, "Invalid due_date or timestamp format"
-            if due_date <= timestamp:
-                return False, "due_date must be after timestamp"
-        
-        # Validate integrity hash
-        if not instruction.get('integrity_hash'):
-            return False, "Missing integrity_hash"
-        
-        # Validate parties
-        if not instruction.get('creditor') or not instruction.get('debtor'):
-            return False, "Both creditor and debtor must be specified"
-        
-        return True, None
-    
-    @classmethod
-    def is_seam_compliant(cls, instruction: Dict) -> bool:
-        """Quick check if instruction is SEAM-compliant"""
-        is_valid, _ = cls.validate(instruction)
-        return is_valid
-    
-    @classmethod
-    def get_validation_report(cls, instruction: Dict) -> Dict:
-        """Get detailed validation report"""
-        is_valid, error = cls.validate(instruction)
-        
-        return {
-            'is_valid': is_valid,
-            'error': error,
-            'seam_version': '1.0',
-            'validated_at': int(time.time()),
-            'fields_present': list(instruction.keys()),
-            'missing_optional': list(cls.OPTIONAL_FIELDS - set(instruction.keys()))
-        }
-
-def create_seam_payment_obligation(
-    amount: float,
-    currency: str,
-    creditor: str,
-    debtor: str,
-    due_date: Optional[int] = None,
-    terms: str = None,
-    reference: str = None,
-    interest_rate: float = None,
-    jurisdiction: str = None
-) -> Dict:
-    """
-    Create SEAM-compliant Payment Obligation
-    
-    A payment obligation represents an unconditional promise to pay.
-    Can be used as:
-    - Collateral for loans
-    - Tradeable instrument (factoring)
-    - Supply chain financing
-    
-    Args:
-        amount: Payment amount (must be positive)
-        currency: ISO 4217 currency code (USD, EUR, BRL, etc)
-        creditor: Entity receiving payment
-        debtor: Entity making payment
-        due_date: Unix timestamp for payment deadline (optional)
-        terms: Payment terms/conditions
-        reference: External reference (PO number, invoice, etc)
-        interest_rate: Annual interest rate if late (optional)
-        jurisdiction: Legal jurisdiction for enforcement
-    
-    Returns:
-        SEAM-compliant instruction dict
-    """
-    instruction_id = generate_instruction_id()
-    timestamp = int(time.time())
-    
-    # Default due date: 90 days from now
-    if due_date is None:
-        due_date = timestamp + (90 * 24 * 3600)
-    
-    # Build SEAM payload
-    seam_data = {
-        'seam_type': SEAMType.PAYMENT_OBLIGATION.value,
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'due_date': due_date,
-        'terms': terms or 'Unconditional payment obligation',
-        'reference': reference or instruction_id,
-        'timestamp': timestamp
-    }
-    
-    if interest_rate:
-        seam_data['interest_rate'] = float(interest_rate)
-    if jurisdiction:
-        seam_data['jurisdiction'] = jurisdiction
-    
-    # Generate integrity hash
-    payload_str = json.dumps(seam_data, sort_keys=True)
-    integrity_hash = generate_dna_hash(payload_str)
-    
-    instruction = {
-        'instruction_id': instruction_id,
-        'seam_type': SEAMType.PAYMENT_OBLIGATION.value,
-        'seam_version': '1.0',
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'due_date': due_date,
-        'terms': terms or 'Unconditional payment obligation',
-        'reference': reference or instruction_id,
-        'timestamp': timestamp,
-        'integrity_hash': integrity_hash,
-        'payload': payload_str,
-        'encrypted': False
-    }
-    
-    if interest_rate:
-        instruction['interest_rate'] = float(interest_rate)
-    if jurisdiction:
-        instruction['jurisdiction'] = jurisdiction
-    
-    # Validate
-    is_valid, error = SEAMValidator.validate(instruction)
-    if not is_valid:
-        raise ValueError(f"SEAM validation failed: {error}")
-    
-    return instruction
-
-def create_seam_invoice(
-    amount: float,
-    currency: str,
-    creditor: str,
-    debtor: str,
-    invoice_number: str,
-    due_date: int,
-    line_items: List[Dict] = None,
-    tax_amount: float = None,
-    discount_amount: float = None
-) -> Dict:
-    """
-    Create SEAM-compliant Invoice
-    
-    Represents goods/services delivered, payment due.
-    
-    Args:
-        amount: Total invoice amount
-        currency: ISO 4217 currency code
-        creditor: Seller/service provider
-        debtor: Buyer/customer
-        invoice_number: Unique invoice identifier
-        due_date: Payment deadline (unix timestamp)
-        line_items: List of items (optional)
-        tax_amount: Total tax (optional)
-        discount_amount: Total discount (optional)
-    """
-    instruction_id = generate_instruction_id()
-    timestamp = int(time.time())
-    
-    seam_data = {
-        'seam_type': SEAMType.INVOICE.value,
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'due_date': due_date,
-        'invoice_number': invoice_number,
-        'terms': 'Payment due upon receipt of valid invoice',
-        'reference': invoice_number,
-        'timestamp': timestamp
-    }
-    
-    if line_items:
-        seam_data['line_items'] = line_items
-    if tax_amount:
-        seam_data['tax_amount'] = float(tax_amount)
-    if discount_amount:
-        seam_data['discount_amount'] = float(discount_amount)
-    
-    payload_str = json.dumps(seam_data, sort_keys=True)
-    integrity_hash = generate_dna_hash(payload_str)
-    
-    instruction = {
-        'instruction_id': instruction_id,
-        'seam_type': SEAMType.INVOICE.value,
-        'seam_version': '1.0',
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'due_date': due_date,
-        'invoice_number': invoice_number,
-        'terms': 'Payment due upon receipt of valid invoice',
-        'reference': invoice_number,
-        'timestamp': timestamp,
-        'integrity_hash': integrity_hash,
-        'payload': payload_str,
-        'encrypted': False
-    }
-    
-    if line_items:
-        instruction['line_items'] = line_items
-    if tax_amount:
-        instruction['tax_amount'] = float(tax_amount)
-    if discount_amount:
-        instruction['discount_amount'] = float(discount_amount)
-    
-    # Validate
-    is_valid, error = SEAMValidator.validate(instruction)
-    if not is_valid:
-        raise ValueError(f"SEAM validation failed: {error}")
-    
-    return instruction
-
-def create_seam_letter_of_credit(
-    amount: float,
-    currency: str,
-    creditor: str,
-    debtor: str,
-    issuing_bank: str,
-    beneficiary_bank: str,
-    expiry_date: int,
-    terms: str,
-    documents_required: List[str] = None
-) -> Dict:
-    """
-    Create SEAM-compliant Letter of Credit
-    
-    Bank guarantee that buyer's payment to seller will be received on time.
-    
-    Args:
-        amount: Credit amount
-        currency: ISO 4217 currency code
-        creditor: Beneficiary (seller)
-        debtor: Applicant (buyer)
-        issuing_bank: Bank issuing the LC
-        beneficiary_bank: Seller's bank
-        expiry_date: LC expiration (unix timestamp)
-        terms: Conditions for payment
-        documents_required: List of required documents
-    """
-    instruction_id = generate_instruction_id()
-    timestamp = int(time.time())
-    
-    seam_data = {
-        'seam_type': SEAMType.LETTER_OF_CREDIT.value,
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'issuing_bank': issuing_bank,
-        'beneficiary_bank': beneficiary_bank,
-        'due_date': expiry_date,
-        'terms': terms,
-        'reference': f'LC-{instruction_id[:8]}',
-        'timestamp': timestamp
-    }
-    
-    if documents_required:
-        seam_data['documents_required'] = documents_required
-    
-    payload_str = json.dumps(seam_data, sort_keys=True)
-    integrity_hash = generate_dna_hash(payload_str)
-    
-    instruction = {
-        'instruction_id': instruction_id,
-        'seam_type': SEAMType.LETTER_OF_CREDIT.value,
-        'seam_version': '1.0',
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'issuing_bank': issuing_bank,
-        'beneficiary_bank': beneficiary_bank,
-        'due_date': expiry_date,
-        'terms': terms,
-        'reference': f'LC-{instruction_id[:8]}',
-        'timestamp': timestamp,
-        'integrity_hash': integrity_hash,
-        'payload': payload_str,
-        'encrypted': False
-    }
-    
-    if documents_required:
-        instruction['documents_required'] = documents_required
-    
-    # Validate
-    is_valid, error = SEAMValidator.validate(instruction)
-    if not is_valid:
-        raise ValueError(f"SEAM validation failed: {error}")
-    
-    return instruction
-
-def create_seam_purchase_order(
-    amount: float,
-    currency: str,
-    creditor: str,
-    debtor: str,
-    po_number: str,
-    delivery_date: int,
-    items: List[Dict],
-    shipping_address: str = None
-) -> Dict:
-    """
-    Create SEAM-compliant Purchase Order
-    
-    Commercial document issued by buyer to seller.
-    
-    Args:
-        amount: Total PO amount
-        currency: ISO 4217 currency code
-        creditor: Seller
-        debtor: Buyer
-        po_number: Purchase order number
-        delivery_date: Expected delivery (unix timestamp)
-        items: List of items to purchase
-        shipping_address: Delivery address
-    """
-    instruction_id = generate_instruction_id()
-    timestamp = int(time.time())
-    
-    seam_data = {
-        'seam_type': SEAMType.PURCHASE_ORDER.value,
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'due_date': delivery_date,
-        'po_number': po_number,
-        'items': items,
-        'terms': 'Payment upon delivery',
-        'reference': po_number,
-        'timestamp': timestamp
-    }
-    
-    if shipping_address:
-        seam_data['shipping_address'] = shipping_address
-    
-    payload_str = json.dumps(seam_data, sort_keys=True)
-    integrity_hash = generate_dna_hash(payload_str)
-    
-    instruction = {
-        'instruction_id': instruction_id,
-        'seam_type': SEAMType.PURCHASE_ORDER.value,
-        'seam_version': '1.0',
-        'amount': float(amount),
-        'currency': currency.upper(),
-        'creditor': creditor,
-        'debtor': debtor,
-        'due_date': delivery_date,
-        'po_number': po_number,
-        'items': items,
-        'terms': 'Payment upon delivery',
-        'reference': po_number,
-        'timestamp': timestamp,
-        'integrity_hash': integrity_hash,
-        'payload': payload_str,
-        'encrypted': False
-    }
-    
-    if shipping_address:
-        instruction['shipping_address'] = shipping_address
-    
-    # Validate
-    is_valid, error = SEAMValidator.validate(instruction)
-    if not is_valid:
-        raise ValueError(f"SEAM validation failed: {error}")
-    
-    return instruction
 
 # ===== CONFIGURATIONS =====
 # Load config file if exists
@@ -735,6 +300,17 @@ BLIND_RELAY_ENABLED = _config('blind_relay_enabled', True)
 MAX_RELAY_HOPS = _config('max_relay_hops', 10)
 SERVED_DESTINATIONS = _config('served_destinations', []) or []
 BLIND_RELAY_FLOOD = _config('blind_relay_flood', False)
+OTC_ENABLED = _config('otc_enabled', True)
+EVM_RPC_URL = _config('evm_rpc_url', '')
+EVM_CHAIN_ID = int(_config('evm_chain_id', 11155111))
+ESCROW_FACTORY_ADDRESS = _config('escrow_factory_address', '')
+ESCROW_CONFIRMATIONS_REQUIRED = int(_config('escrow_confirmations_required', 1))
+ESCROW_VERIFY_ON_SUBMIT = bool(_config('escrow_verify_on_submit', False))
+OTC_DEFAULT_FEE_BPS = int(_config('otc_default_fee_bps', 20))
+OTC_MAX_TRADE_NOTIONAL = float(_config('otc_max_trade_notional', 10_000_000))
+WALLET_BINDING_REQUIRED = bool(_config('wallet_binding_required', True))
+ALLOWED_BASE_ASSETS = set((_config('allowed_base_assets', ['BTC', 'ETH', 'USDT']) or []))
+ALLOWED_QUOTE_ASSETS = set((_config('allowed_quote_assets', ['USDT', 'USDC', 'USD']) or []))
 
 # Protocol commands
 CMD_HANDSHAKE = 'HANDSHAKE'
@@ -743,6 +319,19 @@ CMD_STORE_MANIFEST = 'STORE_MANIFEST'
 CMD_FETCH_SHARD = 'FETCH_SHARD'
 CMD_FETCH_MANIFEST = 'FETCH_MANIFEST'
 CMD_HEALTH_CHECK = 'HEALTH_CHECK'
+
+# OTC states
+RFQ_STATUS_OPEN = 'RFQ_OPEN'
+RFQ_STATUS_ACCEPTED = 'RFQ_ACCEPTED'
+RFQ_STATUS_CANCELLED = 'CANCELLED'
+RFQ_STATUS_EXPIRED = 'EXPIRED'
+TRADE_STATUS_CREATED = 'CREATED'
+TRADE_STATUS_ESCROW_CREATED = 'ESCROW_CREATED'
+TRADE_STATUS_FUNDED = 'FUNDED'
+TRADE_STATUS_SETTLED = 'SETTLED'
+TRADE_STATUS_REFUNDED = 'REFUNDED'
+TRADE_STATUS_CANCELLED = 'CANCELLED'
+TRADE_STATUS_EXPIRED = 'EXPIRED'
 
 # Node state
 node_id = None
@@ -856,16 +445,86 @@ class StorageDB:
                 )
                 """)
                 cur.execute("""
-                CREATE TABLE IF NOT EXISTS metering_events (
-                    instruction_id TEXT,
+                CREATE TABLE IF NOT EXISTS wallet_bindings (
                     client_id TEXT,
-                    timestamp INTEGER,
-                    node_id TEXT,
+                    wallet_address TEXT,
+                    chain_id INTEGER,
+                    status TEXT,
+                    created_at INTEGER,
+                    PRIMARY KEY (client_id, wallet_address, chain_id)
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS rfqs (
+                    rfq_id TEXT PRIMARY KEY,
+                    maker_client_id TEXT,
+                    maker_wallet TEXT,
+                    taker_client_id TEXT,
+                    maker_side TEXT,
+                    base_asset TEXT,
+                    quote_asset TEXT,
+                    base_amount REAL,
+                    quote_amount REAL,
+                    price REAL,
+                    expires_at INTEGER,
+                    status TEXT,
+                    metadata_json TEXT,
+                    private_instruction_id TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_rfqs_status ON rfqs(status)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    trade_id TEXT PRIMARY KEY,
+                    rfq_id TEXT,
+                    buyer_client_id TEXT,
+                    seller_client_id TEXT,
+                    buyer_wallet TEXT,
+                    seller_wallet TEXT,
+                    base_asset TEXT,
+                    quote_asset TEXT,
+                    base_amount REAL,
+                    quote_amount REAL,
+                    status TEXT,
+                    fee_bps INTEGER,
+                    fee_amount REAL,
+                    fee_asset TEXT,
+                    escrow_chain_id INTEGER,
+                    escrow_factory TEXT,
+                    escrow_trade_ref TEXT,
+                    escrow_tx_hashes_json TEXT,
+                    private_instruction_id TEXT,
+                    metadata_json TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS escrow_events (
+                    event_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
                     event_type TEXT,
-                    billable INTEGER,
-                    price_usd REAL,
-                    access_release_token TEXT,
-                    signature TEXT
+                    tx_hash TEXT,
+                    block_number INTEGER,
+                    chain_id INTEGER,
+                    payload_json TEXT,
+                    created_at INTEGER
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS trade_fee_events (
+                    event_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    client_id TEXT,
+                    fee_bps INTEGER,
+                    notional_amount REAL,
+                    fee_amount REAL,
+                    asset TEXT,
+                    status TEXT,
+                    created_at INTEGER
                 )
                 """)
                 self.conn.commit()
@@ -913,16 +572,86 @@ class StorageDB:
                 )
                 """)
                 cur.execute("""
-                CREATE TABLE IF NOT EXISTS metering_events (
-                    instruction_id TEXT,
+                CREATE TABLE IF NOT EXISTS wallet_bindings (
                     client_id TEXT,
-                    timestamp INTEGER,
-                    node_id TEXT,
+                    wallet_address TEXT,
+                    chain_id INTEGER,
+                    status TEXT,
+                    created_at INTEGER,
+                    PRIMARY KEY (client_id, wallet_address, chain_id)
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS rfqs (
+                    rfq_id TEXT PRIMARY KEY,
+                    maker_client_id TEXT,
+                    maker_wallet TEXT,
+                    taker_client_id TEXT,
+                    maker_side TEXT,
+                    base_asset TEXT,
+                    quote_asset TEXT,
+                    base_amount DOUBLE PRECISION,
+                    quote_amount DOUBLE PRECISION,
+                    price DOUBLE PRECISION,
+                    expires_at BIGINT,
+                    status TEXT,
+                    metadata_json TEXT,
+                    private_instruction_id TEXT,
+                    created_at BIGINT,
+                    updated_at BIGINT
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_rfqs_status ON rfqs(status)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    trade_id TEXT PRIMARY KEY,
+                    rfq_id TEXT,
+                    buyer_client_id TEXT,
+                    seller_client_id TEXT,
+                    buyer_wallet TEXT,
+                    seller_wallet TEXT,
+                    base_asset TEXT,
+                    quote_asset TEXT,
+                    base_amount DOUBLE PRECISION,
+                    quote_amount DOUBLE PRECISION,
+                    status TEXT,
+                    fee_bps INTEGER,
+                    fee_amount DOUBLE PRECISION,
+                    fee_asset TEXT,
+                    escrow_chain_id INTEGER,
+                    escrow_factory TEXT,
+                    escrow_trade_ref TEXT,
+                    escrow_tx_hashes_json TEXT,
+                    private_instruction_id TEXT,
+                    metadata_json TEXT,
+                    created_at BIGINT,
+                    updated_at BIGINT
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS escrow_events (
+                    event_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
                     event_type TEXT,
-                    billable INTEGER,
-                    price_usd REAL,
-                    access_release_token TEXT,
-                    signature TEXT
+                    tx_hash TEXT,
+                    block_number BIGINT,
+                    chain_id INTEGER,
+                    payload_json TEXT,
+                    created_at BIGINT
+                )
+                """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS trade_fee_events (
+                    event_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    client_id TEXT,
+                    fee_bps INTEGER,
+                    notional_amount DOUBLE PRECISION,
+                    fee_amount DOUBLE PRECISION,
+                    asset TEXT,
+                    status TEXT,
+                    created_at BIGINT
                 )
                 """)
     
@@ -1065,43 +794,238 @@ class StorageDB:
             })
         return out
     
-    def record_metering(self, event: Dict[str, Any]):
-        self._execute("""INSERT INTO metering_events
-            (instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd,
-             access_release_token, signature)
-            VALUES (?,?,?,?,?,?,?,?,?)"""
-            if self.backend == 'sqlite' else
-            """INSERT INTO metering_events
-            (instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd,
-             access_release_token, signature)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (event['instruction_id'], event['client_id'], event['timestamp'], event['node_id'],
-             event['event_type'], 1 if event.get('billable') else 0,
-             event['price_usd'], event.get('access_release_token', ''), event.get('signature', '')))
-    
-    def list_metering_events(self, client_id: str, start: int, end: int) -> List[Dict[str, Any]]:
-        cur = self._execute("SELECT instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd, access_release_token, signature FROM metering_events WHERE client_id=? AND timestamp BETWEEN ? AND ?"
+    def bind_wallet(self, client_id: str, wallet_address: str, chain_id: int, status: str = 'active'):
+        created_at = int(time.time() * 1000)
+        if self.backend == 'sqlite':
+            self._execute("""INSERT OR REPLACE INTO wallet_bindings (client_id, wallet_address, chain_id, status, created_at)
+                             VALUES (?,?,?,?,?)""", (client_id, wallet_address.lower(), chain_id, status, created_at))
+        else:
+            self._execute("""INSERT INTO wallet_bindings (client_id, wallet_address, chain_id, status, created_at)
+                             VALUES (%s,%s,%s,%s,%s)
+                             ON CONFLICT (client_id, wallet_address, chain_id)
+                             DO UPDATE SET status=EXCLUDED.status, created_at=EXCLUDED.created_at""",
+                          (client_id, wallet_address.lower(), chain_id, status, created_at))
+
+    def wallet_bound(self, client_id: str, wallet_address: str, chain_id: int) -> bool:
+        cur = self._execute("SELECT 1 FROM wallet_bindings WHERE client_id=? AND wallet_address=? AND chain_id=? AND status='active'"
                             if self.backend == 'sqlite'
-                            else "SELECT instruction_id, client_id, timestamp, node_id, event_type, billable, price_usd, access_release_token, signature FROM metering_events WHERE client_id=%s AND timestamp BETWEEN %s AND %s",
-                            (client_id, start, end))
+                            else "SELECT 1 FROM wallet_bindings WHERE client_id=%s AND wallet_address=%s AND chain_id=%s AND status='active'",
+                            (client_id, wallet_address.lower(), chain_id))
+        return cur.fetchone() is not None
+
+    def create_rfq(self, rfq: Dict[str, Any]):
+        now_ms = int(time.time() * 1000)
+        data = (
+            rfq['rfq_id'], rfq['maker_client_id'], rfq['maker_wallet'].lower(), rfq.get('taker_client_id', ''),
+            rfq.get('maker_side', 'sell'), rfq['base_asset'], rfq['quote_asset'], rfq['base_amount'],
+            rfq['quote_amount'], rfq['price'], rfq['expires_at'], rfq['status'],
+            json.dumps(rfq.get('metadata', {})), rfq.get('private_instruction_id', ''), now_ms, now_ms
+        )
+        if self.backend == 'sqlite':
+            self._execute("""INSERT INTO rfqs
+                (rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset, quote_asset,
+                 base_amount, quote_amount, price, expires_at, status, metadata_json, private_instruction_id, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", data)
+        else:
+            self._execute("""INSERT INTO rfqs
+                (rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset, quote_asset,
+                 base_amount, quote_amount, price, expires_at, status, metadata_json, private_instruction_id, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", data)
+
+    def get_rfq(self, rfq_id: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("""SELECT rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset,
+                               quote_asset, base_amount, quote_amount, price, expires_at, status, metadata_json,
+                               private_instruction_id, created_at, updated_at FROM rfqs WHERE rfq_id=?"""
+                            if self.backend == 'sqlite'
+                            else """SELECT rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset,
+                               quote_asset, base_amount, quote_amount, price, expires_at, status, metadata_json,
+                               private_instruction_id, created_at, updated_at FROM rfqs WHERE rfq_id=%s""",
+                            (rfq_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'rfq_id': row[0], 'maker_client_id': row[1], 'maker_wallet': row[2], 'taker_client_id': row[3],
+            'maker_side': row[4], 'base_asset': row[5], 'quote_asset': row[6], 'base_amount': row[7],
+            'quote_amount': row[8], 'price': row[9], 'expires_at': row[10], 'status': row[11],
+            'metadata': json.loads(row[12]) if row[12] else {}, 'private_instruction_id': row[13],
+            'created_at': row[14], 'updated_at': row[15]
+        }
+
+    def update_rfq_status(self, rfq_id: str, status: str):
+        now_ms = int(time.time() * 1000)
+        self._execute("UPDATE rfqs SET status=?, updated_at=? WHERE rfq_id=?"
+                      if self.backend == 'sqlite'
+                      else "UPDATE rfqs SET status=%s, updated_at=%s WHERE rfq_id=%s",
+                      (status, now_ms, rfq_id))
+
+    def list_rfqs(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        if status:
+            cur = self._execute("""SELECT rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset,
+                                   quote_asset, base_amount, quote_amount, price, expires_at, status, metadata_json,
+                                   private_instruction_id, created_at, updated_at FROM rfqs WHERE status=? ORDER BY created_at DESC"""
+                                if self.backend == 'sqlite'
+                                else """SELECT rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset,
+                                   quote_asset, base_amount, quote_amount, price, expires_at, status, metadata_json,
+                                   private_instruction_id, created_at, updated_at FROM rfqs WHERE status=%s ORDER BY created_at DESC""",
+                                (status,))
+        else:
+            cur = self._execute("""SELECT rfq_id, maker_client_id, maker_wallet, taker_client_id, maker_side, base_asset,
+                                   quote_asset, base_amount, quote_amount, price, expires_at, status, metadata_json,
+                                   private_instruction_id, created_at, updated_at FROM rfqs ORDER BY created_at DESC""")
         out = []
-        for r in cur.fetchall():
+        for row in cur.fetchall():
             out.append({
-                'instruction_id': r[0],
-                'client_id': r[1],
-                'timestamp': r[2],
-                'node_id': r[3],
-                'event_type': r[4],
-                'billable': bool(r[5]),
-                'price_usd': r[6],
-                'access_release_token': r[7],
-                'signature': r[8]
+                'rfq_id': row[0], 'maker_client_id': row[1], 'maker_wallet': row[2], 'taker_client_id': row[3],
+                'maker_side': row[4], 'base_asset': row[5], 'quote_asset': row[6], 'base_amount': row[7],
+                'quote_amount': row[8], 'price': row[9], 'expires_at': row[10], 'status': row[11],
+                'metadata': json.loads(row[12]) if row[12] else {}, 'private_instruction_id': row[13],
+                'created_at': row[14], 'updated_at': row[15]
             })
         return out
 
-    def list_metering_clients(self) -> List[str]:
-        cur = self._execute("SELECT DISTINCT client_id FROM metering_events")
-        return [r[0] for r in cur.fetchall() if r and r[0]]
+    def create_trade(self, trade: Dict[str, Any]):
+        now_ms = int(time.time() * 1000)
+        data = (
+            trade['trade_id'], trade.get('rfq_id', ''), trade['buyer_client_id'], trade['seller_client_id'],
+            trade['buyer_wallet'].lower(), trade['seller_wallet'].lower(), trade['base_asset'], trade['quote_asset'],
+            trade['base_amount'], trade['quote_amount'], trade['status'], trade['fee_bps'], trade['fee_amount'],
+            trade['fee_asset'], trade.get('escrow_chain_id', EVM_CHAIN_ID), trade.get('escrow_factory', ESCROW_FACTORY_ADDRESS),
+            trade.get('escrow_trade_ref', ''), json.dumps(trade.get('escrow_tx_hashes', [])),
+            trade.get('private_instruction_id', ''), json.dumps(trade.get('metadata', {})), now_ms, now_ms
+        )
+        if self.backend == 'sqlite':
+            self._execute("""INSERT INTO trades
+                (trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet, base_asset, quote_asset,
+                 base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset, escrow_chain_id, escrow_factory,
+                 escrow_trade_ref, escrow_tx_hashes_json, private_instruction_id, metadata_json, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", data)
+        else:
+            self._execute("""INSERT INTO trades
+                (trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet, base_asset, quote_asset,
+                 base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset, escrow_chain_id, escrow_factory,
+                 escrow_trade_ref, escrow_tx_hashes_json, private_instruction_id, metadata_json, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", data)
+
+    def get_trade(self, trade_id: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("""SELECT trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet,
+                               base_asset, quote_asset, base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset,
+                               escrow_chain_id, escrow_factory, escrow_trade_ref, escrow_tx_hashes_json,
+                               private_instruction_id, metadata_json, created_at, updated_at
+                               FROM trades WHERE trade_id=?"""
+                            if self.backend == 'sqlite'
+                            else """SELECT trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet,
+                               base_asset, quote_asset, base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset,
+                               escrow_chain_id, escrow_factory, escrow_trade_ref, escrow_tx_hashes_json,
+                               private_instruction_id, metadata_json, created_at, updated_at
+                               FROM trades WHERE trade_id=%s""",
+                            (trade_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'trade_id': row[0], 'rfq_id': row[1], 'buyer_client_id': row[2], 'seller_client_id': row[3],
+            'buyer_wallet': row[4], 'seller_wallet': row[5], 'base_asset': row[6], 'quote_asset': row[7],
+            'base_amount': row[8], 'quote_amount': row[9], 'status': row[10], 'fee_bps': row[11],
+            'fee_amount': row[12], 'fee_asset': row[13], 'escrow_chain_id': row[14], 'escrow_factory': row[15],
+            'escrow_trade_ref': row[16], 'escrow_tx_hashes': json.loads(row[17]) if row[17] else [],
+            'private_instruction_id': row[18], 'metadata': json.loads(row[19]) if row[19] else {},
+            'created_at': row[20], 'updated_at': row[21]
+        }
+
+    def update_trade_state(self, trade_id: str, status: str, escrow_trade_ref: Optional[str] = None,
+                           add_tx_hash: Optional[str] = None):
+        trade = self.get_trade(trade_id)
+        if not trade:
+            return
+        txs = trade.get('escrow_tx_hashes', [])
+        if add_tx_hash:
+            txs.append(add_tx_hash)
+        now_ms = int(time.time() * 1000)
+        self._execute("""UPDATE trades SET status=?, escrow_trade_ref=?, escrow_tx_hashes_json=?, updated_at=?
+                         WHERE trade_id=?"""
+                      if self.backend == 'sqlite'
+                      else """UPDATE trades SET status=%s, escrow_trade_ref=%s, escrow_tx_hashes_json=%s, updated_at=%s
+                         WHERE trade_id=%s""",
+                      (status, escrow_trade_ref or trade.get('escrow_trade_ref', ''), json.dumps(txs), now_ms, trade_id))
+
+    def list_trades(self, client_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if client_id:
+            cur = self._execute("""SELECT trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet,
+                                   base_asset, quote_asset, base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset,
+                                   escrow_chain_id, escrow_factory, escrow_trade_ref, escrow_tx_hashes_json,
+                                   private_instruction_id, metadata_json, created_at, updated_at
+                                   FROM trades WHERE buyer_client_id=? OR seller_client_id=? ORDER BY created_at DESC"""
+                                if self.backend == 'sqlite'
+                                else """SELECT trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet,
+                                   base_asset, quote_asset, base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset,
+                                   escrow_chain_id, escrow_factory, escrow_trade_ref, escrow_tx_hashes_json,
+                                   private_instruction_id, metadata_json, created_at, updated_at
+                                   FROM trades WHERE buyer_client_id=%s OR seller_client_id=%s ORDER BY created_at DESC""",
+                                (client_id, client_id))
+        else:
+            cur = self._execute("""SELECT trade_id, rfq_id, buyer_client_id, seller_client_id, buyer_wallet, seller_wallet,
+                                   base_asset, quote_asset, base_amount, quote_amount, status, fee_bps, fee_amount, fee_asset,
+                                   escrow_chain_id, escrow_factory, escrow_trade_ref, escrow_tx_hashes_json,
+                                   private_instruction_id, metadata_json, created_at, updated_at
+                                   FROM trades ORDER BY created_at DESC""")
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                'trade_id': row[0], 'rfq_id': row[1], 'buyer_client_id': row[2], 'seller_client_id': row[3],
+                'buyer_wallet': row[4], 'seller_wallet': row[5], 'base_asset': row[6], 'quote_asset': row[7],
+                'base_amount': row[8], 'quote_amount': row[9], 'status': row[10], 'fee_bps': row[11],
+                'fee_amount': row[12], 'fee_asset': row[13], 'escrow_chain_id': row[14], 'escrow_factory': row[15],
+                'escrow_trade_ref': row[16], 'escrow_tx_hashes': json.loads(row[17]) if row[17] else [],
+                'private_instruction_id': row[18], 'metadata': json.loads(row[19]) if row[19] else {},
+                'created_at': row[20], 'updated_at': row[21]
+            })
+        return out
+
+    def record_escrow_event(self, event: Dict[str, Any]):
+        data = (
+            event.get('event_id', str(uuid_lib.uuid4())), event['trade_id'], event['event_type'],
+            event.get('tx_hash', ''), event.get('block_number', 0), event.get('chain_id', EVM_CHAIN_ID),
+            json.dumps(event.get('payload', {})), int(time.time() * 1000)
+        )
+        self._execute("""INSERT INTO escrow_events
+                         (event_id, trade_id, event_type, tx_hash, block_number, chain_id, payload_json, created_at)
+                         VALUES (?,?,?,?,?,?,?,?)"""
+                      if self.backend == 'sqlite'
+                      else """INSERT INTO escrow_events
+                         (event_id, trade_id, event_type, tx_hash, block_number, chain_id, payload_json, created_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                      data)
+
+    def record_trade_fee_event(self, event: Dict[str, Any]):
+        data = (
+            event.get('event_id', str(uuid_lib.uuid4())), event['trade_id'], event['client_id'],
+            event['fee_bps'], event['notional_amount'], event['fee_amount'], event['asset'],
+            event.get('status', 'pending'), int(time.time() * 1000)
+        )
+        self._execute("""INSERT INTO trade_fee_events
+                         (event_id, trade_id, client_id, fee_bps, notional_amount, fee_amount, asset, status, created_at)
+                         VALUES (?,?,?,?,?,?,?,?,?)"""
+                      if self.backend == 'sqlite'
+                      else """INSERT INTO trade_fee_events
+                         (event_id, trade_id, client_id, fee_bps, notional_amount, fee_amount, asset, status, created_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                      data)
+
+    def list_trade_fee_events(self, client_id: str, start_ms: int, end_ms: int) -> List[Dict[str, Any]]:
+        cur = self._execute("""SELECT trade_id, client_id, fee_bps, notional_amount, fee_amount, asset, status, created_at
+                               FROM trade_fee_events WHERE client_id=? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC"""
+                            if self.backend == 'sqlite'
+                            else """SELECT trade_id, client_id, fee_bps, notional_amount, fee_amount, asset, status, created_at
+                               FROM trade_fee_events WHERE client_id=%s AND created_at BETWEEN %s AND %s ORDER BY created_at DESC""",
+                            (client_id, start_ms, end_ms))
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                'trade_id': row[0], 'client_id': row[1], 'fee_bps': row[2], 'notional_amount': row[3],
+                'fee_amount': row[4], 'asset': row[5], 'status': row[6], 'created_at': row[7]
+            })
+        return out
 
     def close(self):
         try:
@@ -1373,6 +1297,471 @@ def idempotency_put(client_id: str, key: str, payload: Dict[str, Any], status: i
     _idempotency_cache[(client_id, key)] = {'ts': now, 'payload': payload, 'status': status}
     _idempotency_cleanup(now)
 
+# ===== OTC DOMAIN (RFQ/TRADES/ESCROW) =====
+def generate_rfq_id() -> str:
+    return f"rfq_{int(time.time())}_{secrets.token_hex(4)}"
+
+def generate_trade_id() -> str:
+    return f"trade_{int(time.time())}_{secrets.token_hex(4)}"
+
+def _normalize_wallet(wallet_address: str) -> str:
+    return (wallet_address or '').strip().lower()
+
+def _normalize_asset(asset: str) -> str:
+    return (asset or '').strip().upper()
+
+def _ensure_allowed_assets(base_asset: str, quote_asset: str):
+    base = _normalize_asset(base_asset)
+    quote = _normalize_asset(quote_asset)
+    if ALLOWED_BASE_ASSETS and base not in ALLOWED_BASE_ASSETS:
+        raise ValueError(f"Unsupported base asset: {base}")
+    if ALLOWED_QUOTE_ASSETS and quote not in ALLOWED_QUOTE_ASSETS:
+        raise ValueError(f"Unsupported quote asset: {quote}")
+    if base == quote:
+        raise ValueError("base_asset and quote_asset must be different")
+
+def _calculate_trade_fee(notional_amount: float, fee_bps: int) -> float:
+    return round((float(notional_amount) * float(fee_bps)) / 10000.0, 8)
+
+def _ensure_wallet_authorized(client: Dict[str, Any], wallet_address: str, chain_id: int):
+    wallet = _normalize_wallet(wallet_address)
+    if not wallet:
+        raise ValueError("wallet_address is required")
+    client_id = client.get('client_id', '')
+    if WALLET_BINDING_REQUIRED and not STORAGE_DB.wallet_bound(client_id, wallet, chain_id):
+        raise PermissionError("wallet not bound to authenticated client")
+    claims = client.get('claims') or {}
+    if isinstance(claims, dict):
+        claim_wallets = claims.get('wallets') or claims.get('wallet_addresses') or []
+        if isinstance(claim_wallets, str):
+            claim_wallets = [claim_wallets]
+        normalized = {_normalize_wallet(w) for w in claim_wallets if w}
+        if normalized and wallet not in normalized:
+            raise PermissionError("wallet not permitted by JWT claims")
+
+def _trade_actor_allowed(client: Dict[str, Any], trade: Dict[str, Any]) -> bool:
+    roles = client.get('roles') or []
+    if 'admin' in roles:
+        return True
+    actor = client.get('client_id', '')
+    return actor in (trade.get('buyer_client_id'), trade.get('seller_client_id'))
+
+def _persist_private_otc_payload(origin_client_id: str, destination_client_id: str,
+                                 payload_obj: Dict[str, Any]) -> str:
+    payload_text = json.dumps(payload_obj, separators=(',', ':'))
+    instr = create_financial_instruction(
+        payload=payload_text,
+        origin=origin_client_id,
+        destination=destination_client_id or origin_client_id
+    )
+    k, n = DEFAULT_QUORUM_K, DEFAULT_QUORUM_N
+    if not SSS_AVAILABLE:
+        k = n
+    instr_json = json.dumps(instr)
+    if SSS_AVAILABLE:
+        encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
+        manifest = create_instruction_manifest(
+            instr,
+            [],
+            encrypted_payload_b64=encrypted_b64,
+            shard_dicts=shard_dicts,
+            quorum_k=k,
+            quorum_n=n
+        )
+        manifest['shards'] = [
+            f"{instr['instruction_id']}_shard{s['index']}_v{r+1}.json"
+            for s in shard_dicts for r in range(3)
+        ]
+        distribute_shards_smart(shard_dicts, instr['instruction_id'], destination_client_id, manifest, k, n, use_sss=True)
+    else:
+        shards = split_text(instr_json, n)
+        manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
+        manifest['shards'] = [f"{instr['instruction_id']}_shard{i+1}_v{r+1}.json" for i in range(n) for r in range(3)]
+        distribute_shards_smart(shards, instr['instruction_id'], destination_client_id, manifest, k, n, use_sss=False)
+    return instr['instruction_id']
+
+def otc_bind_wallet(client: Dict[str, Any], wallet_address: str, chain_id: int) -> Dict[str, Any]:
+    wallet = _normalize_wallet(wallet_address)
+    if not wallet:
+        raise ValueError("wallet_address is required")
+    STORAGE_DB.bind_wallet(client['client_id'], wallet, chain_id, status='active')
+    append_audit_event(
+        'wallet_bound',
+        client['client_id'],
+        details={'wallet': wallet, 'chain_id': chain_id}
+    )
+    return {'client_id': client['client_id'], 'wallet_address': wallet, 'chain_id': chain_id, 'status': 'active'}
+
+def otc_create_rfq(client: Dict[str, Any], data: Dict[str, Any], request_id: str = '') -> Dict[str, Any]:
+    if not OTC_ENABLED:
+        raise RuntimeError("otc_disabled")
+    maker_wallet = _normalize_wallet(data.get('maker_wallet', ''))
+    _ensure_wallet_authorized(client, maker_wallet, EVM_CHAIN_ID)
+    base_asset = _normalize_asset(data.get('base_asset', ''))
+    quote_asset = _normalize_asset(data.get('quote_asset', ''))
+    _ensure_allowed_assets(base_asset, quote_asset)
+    base_amount = float(data.get('base_amount', 0))
+    quote_amount = float(data.get('quote_amount', 0))
+    if base_amount <= 0 or quote_amount <= 0:
+        raise ValueError("base_amount and quote_amount must be positive")
+    if quote_amount > OTC_MAX_TRADE_NOTIONAL:
+        raise ValueError("trade exceeds otc_max_trade_notional")
+    expires_in = int(data.get('expires_in_seconds', 900))
+    if expires_in < 30 or expires_in > 7 * 24 * 3600:
+        raise ValueError("expires_in_seconds out of bounds")
+    rfq_id = generate_rfq_id()
+    now_ms = int(time.time() * 1000)
+    private_instruction_id = ''
+    if data.get('private_terms'):
+        private_instruction_id = _persist_private_otc_payload(
+            client['client_id'],
+            data.get('taker_client_id') or client['client_id'],
+            {'kind': 'otc_rfq_private_terms', 'rfq_id': rfq_id, 'private_terms': data.get('private_terms')}
+        )
+    rfq = {
+        'rfq_id': rfq_id,
+        'maker_client_id': client['client_id'],
+        'maker_wallet': maker_wallet,
+        'taker_client_id': (data.get('taker_client_id') or '').strip(),
+        'maker_side': (data.get('maker_side') or 'sell').strip().lower(),
+        'base_asset': base_asset,
+        'quote_asset': quote_asset,
+        'base_amount': base_amount,
+        'quote_amount': quote_amount,
+        'price': round(quote_amount / base_amount, 12),
+        'expires_at': now_ms + (expires_in * 1000),
+        'status': RFQ_STATUS_OPEN,
+        'metadata': data.get('metadata') or {},
+        'private_instruction_id': private_instruction_id
+    }
+    if rfq['maker_side'] not in ('buy', 'sell'):
+        raise ValueError("maker_side must be 'buy' or 'sell'")
+    STORAGE_DB.create_rfq(rfq)
+    append_audit_event(
+        'rfq_created',
+        client['client_id'],
+        rfq_id,
+        details={
+            'base_asset': base_asset,
+            'quote_asset': quote_asset,
+            'base_amount': base_amount,
+            'quote_amount': quote_amount
+        },
+        request_id=request_id
+    )
+    return rfq
+
+def otc_accept_rfq(client: Dict[str, Any], rfq_id: str, taker_wallet: str, request_id: str = '') -> Dict[str, Any]:
+    rfq = STORAGE_DB.get_rfq(rfq_id)
+    if not rfq:
+        raise ValueError("rfq_not_found")
+    if rfq.get('status') != RFQ_STATUS_OPEN:
+        raise ValueError("rfq_not_open")
+    if int(rfq.get('expires_at', 0)) < int(time.time() * 1000):
+        STORAGE_DB.update_rfq_status(rfq_id, RFQ_STATUS_EXPIRED)
+        raise ValueError("rfq_expired")
+    taker_client_id = client['client_id']
+    rfq_taker = (rfq.get('taker_client_id') or '').strip()
+    if rfq_taker and rfq_taker != taker_client_id:
+        raise PermissionError("rfq_restricted_to_other_taker")
+    taker_wallet_normalized = _normalize_wallet(taker_wallet)
+    _ensure_wallet_authorized(client, taker_wallet_normalized, EVM_CHAIN_ID)
+
+    if rfq.get('maker_side') == 'sell':
+        buyer_client_id = taker_client_id
+        buyer_wallet = taker_wallet_normalized
+        seller_client_id = rfq['maker_client_id']
+        seller_wallet = rfq['maker_wallet']
+    else:
+        buyer_client_id = rfq['maker_client_id']
+        buyer_wallet = rfq['maker_wallet']
+        seller_client_id = taker_client_id
+        seller_wallet = taker_wallet_normalized
+
+    fee_bps = OTC_DEFAULT_FEE_BPS
+    fee_amount = _calculate_trade_fee(rfq['quote_amount'], fee_bps)
+    trade = {
+        'trade_id': generate_trade_id(),
+        'rfq_id': rfq_id,
+        'buyer_client_id': buyer_client_id,
+        'seller_client_id': seller_client_id,
+        'buyer_wallet': buyer_wallet,
+        'seller_wallet': seller_wallet,
+        'base_asset': rfq['base_asset'],
+        'quote_asset': rfq['quote_asset'],
+        'base_amount': float(rfq['base_amount']),
+        'quote_amount': float(rfq['quote_amount']),
+        'status': TRADE_STATUS_CREATED,
+        'fee_bps': fee_bps,
+        'fee_amount': fee_amount,
+        'fee_asset': rfq['quote_asset'],
+        'escrow_chain_id': EVM_CHAIN_ID,
+        'escrow_factory': ESCROW_FACTORY_ADDRESS,
+        'private_instruction_id': rfq.get('private_instruction_id', ''),
+        'metadata': {'source': 'rfq_accept'}
+    }
+    STORAGE_DB.create_trade(trade)
+    STORAGE_DB.update_rfq_status(rfq_id, RFQ_STATUS_ACCEPTED)
+    half_fee = round(fee_amount / 2.0, 8)
+    STORAGE_DB.record_trade_fee_event({
+        'trade_id': trade['trade_id'],
+        'client_id': trade['buyer_client_id'],
+        'fee_bps': fee_bps,
+        'notional_amount': trade['quote_amount'],
+        'fee_amount': half_fee,
+        'asset': trade['fee_asset'],
+        'status': 'pending'
+    })
+    STORAGE_DB.record_trade_fee_event({
+        'trade_id': trade['trade_id'],
+        'client_id': trade['seller_client_id'],
+        'fee_bps': fee_bps,
+        'notional_amount': trade['quote_amount'],
+        'fee_amount': half_fee,
+        'asset': trade['fee_asset'],
+        'status': 'pending'
+    })
+    append_audit_event('rfq_accepted', client['client_id'], rfq_id, request_id=request_id)
+    append_audit_event('trade_created', client['client_id'], trade['trade_id'], request_id=request_id)
+    return trade
+
+def otc_create_trade_direct(client: Dict[str, Any], data: Dict[str, Any], request_id: str = '') -> Dict[str, Any]:
+    buyer_client_id = (data.get('buyer_client_id') or '').strip()
+    seller_client_id = (data.get('seller_client_id') or '').strip()
+    if not buyer_client_id or not seller_client_id:
+        raise ValueError("buyer_client_id and seller_client_id are required")
+    if buyer_client_id == seller_client_id:
+        raise ValueError("buyer and seller must be different")
+    roles = client.get('roles') or []
+    actor = client.get('client_id', '')
+    if actor not in (buyer_client_id, seller_client_id) and 'admin' not in roles:
+        raise PermissionError("actor must be one side of trade or admin")
+    base_asset = _normalize_asset(data.get('base_asset', ''))
+    quote_asset = _normalize_asset(data.get('quote_asset', ''))
+    _ensure_allowed_assets(base_asset, quote_asset)
+    base_amount = float(data.get('base_amount', 0))
+    quote_amount = float(data.get('quote_amount', 0))
+    if base_amount <= 0 or quote_amount <= 0:
+        raise ValueError("base_amount and quote_amount must be positive")
+    if quote_amount > OTC_MAX_TRADE_NOTIONAL:
+        raise ValueError("trade exceeds otc_max_trade_notional")
+
+    buyer_wallet = _normalize_wallet(data.get('buyer_wallet', ''))
+    seller_wallet = _normalize_wallet(data.get('seller_wallet', ''))
+    if actor == buyer_client_id:
+        _ensure_wallet_authorized(
+            {'client_id': buyer_client_id, 'claims': client.get('claims'), 'roles': roles},
+            buyer_wallet,
+            EVM_CHAIN_ID
+        )
+    elif 'admin' in roles:
+        _ensure_wallet_authorized(
+            {'client_id': buyer_client_id, 'claims': {}, 'roles': roles},
+            buyer_wallet,
+            EVM_CHAIN_ID
+        )
+    if actor == seller_client_id:
+        _ensure_wallet_authorized(
+            {'client_id': seller_client_id, 'claims': client.get('claims'), 'roles': roles},
+            seller_wallet,
+            EVM_CHAIN_ID
+        )
+    elif 'admin' in roles:
+        _ensure_wallet_authorized(
+            {'client_id': seller_client_id, 'claims': {}, 'roles': roles},
+            seller_wallet,
+            EVM_CHAIN_ID
+        )
+
+    fee_bps = OTC_DEFAULT_FEE_BPS
+    fee_amount = _calculate_trade_fee(quote_amount, fee_bps)
+    trade_id = generate_trade_id()
+    private_instruction_id = ''
+    if data.get('private_terms'):
+        private_instruction_id = _persist_private_otc_payload(
+            buyer_client_id,
+            seller_client_id,
+            {'kind': 'otc_trade_private_terms', 'trade_id': trade_id, 'private_terms': data.get('private_terms')}
+        )
+    trade = {
+        'trade_id': trade_id,
+        'rfq_id': '',
+        'buyer_client_id': buyer_client_id,
+        'seller_client_id': seller_client_id,
+        'buyer_wallet': buyer_wallet,
+        'seller_wallet': seller_wallet,
+        'base_asset': base_asset,
+        'quote_asset': quote_asset,
+        'base_amount': base_amount,
+        'quote_amount': quote_amount,
+        'status': TRADE_STATUS_CREATED,
+        'fee_bps': fee_bps,
+        'fee_amount': fee_amount,
+        'fee_asset': quote_asset,
+        'escrow_chain_id': EVM_CHAIN_ID,
+        'escrow_factory': ESCROW_FACTORY_ADDRESS,
+        'private_instruction_id': private_instruction_id,
+        'metadata': data.get('metadata') or {}
+    }
+    STORAGE_DB.create_trade(trade)
+    half_fee = round(fee_amount / 2.0, 8)
+    for cid in (buyer_client_id, seller_client_id):
+        STORAGE_DB.record_trade_fee_event({
+            'trade_id': trade_id,
+            'client_id': cid,
+            'fee_bps': fee_bps,
+            'notional_amount': quote_amount,
+            'fee_amount': half_fee,
+            'asset': quote_asset,
+            'status': 'pending'
+        })
+    append_audit_event('trade_created', client['client_id'], trade_id, request_id=request_id)
+    return trade
+
+class OTCEscrow:
+    def __init__(self):
+        self.w3 = None
+
+    def _ensure_ready(self):
+        if not WEB3_AVAILABLE:
+            raise RuntimeError("web3_not_installed")
+        if not EVM_RPC_URL:
+            raise RuntimeError("evm_rpc_url_not_configured")
+        if self.w3:
+            return
+        self.w3 = Web3(Web3.HTTPProvider(EVM_RPC_URL, request_kwargs={'timeout': 20}))
+        if not self.w3.is_connected():
+            raise RuntimeError("evm_rpc_unreachable")
+
+    @staticmethod
+    def _normalize_tx_hash(tx_hash: str) -> str:
+        value = (tx_hash or '').strip().lower()
+        if not value.startswith('0x') or len(value) != 66:
+            raise ValueError("invalid_tx_hash")
+        return value
+
+    def observe_external_tx(self, tx_hash: str) -> Dict[str, Any]:
+        normalized = self._normalize_tx_hash(tx_hash)
+        result = {
+            'tx_hash': normalized,
+            'verified': False,
+            'block_number': 0,
+            'confirmations': 0,
+            'chain_id': EVM_CHAIN_ID
+        }
+        if not ESCROW_VERIFY_ON_SUBMIT:
+            return result
+        self._ensure_ready()
+        try:
+            receipt = self.w3.eth.get_transaction_receipt(normalized)
+        except Exception:
+            raise ValueError("tx_not_found")
+        if not receipt:
+            raise ValueError("tx_not_found")
+        if int(receipt.status) != 1:
+            raise ValueError("tx_reverted")
+        block_number = int(receipt.blockNumber or 0)
+        latest = int(self.w3.eth.block_number)
+        confirmations = max(0, latest - block_number + 1) if block_number else 0
+        required = max(1, ESCROW_CONFIRMATIONS_REQUIRED)
+        if confirmations < required:
+            raise ValueError("tx_not_confirmed")
+        result.update({
+            'verified': True,
+            'block_number': block_number,
+            'confirmations': confirmations
+        })
+        return result
+
+    def get_tx_receipt(self, tx_hash: str) -> Dict[str, Any]:
+        normalized = self._normalize_tx_hash(tx_hash)
+        self._ensure_ready()
+        receipt = self.w3.eth.get_transaction_receipt(normalized)
+        if not receipt:
+            raise ValueError("tx_not_found")
+        return {
+            'tx_hash': normalized,
+            'status': int(receipt.status),
+            'block_number': int(receipt.blockNumber or 0)
+        }
+
+OTC_ESCROW = OTCEscrow()
+
+def otc_create_escrow(client: Dict[str, Any], trade_id: str, tx_hash: str,
+                      escrow_trade_ref: Optional[str] = None, request_id: str = '') -> Dict[str, Any]:
+    trade = STORAGE_DB.get_trade(trade_id)
+    if not trade:
+        raise ValueError("trade_not_found")
+    if trade.get('status') not in (TRADE_STATUS_CREATED,):
+        raise ValueError("trade_not_in_escrow_creatable_state")
+    if not _trade_actor_allowed(client, trade):
+        raise PermissionError("actor_not_allowed_for_trade")
+    onchain = OTC_ESCROW.observe_external_tx(tx_hash)
+    STORAGE_DB.update_trade_state(
+        trade_id,
+        TRADE_STATUS_ESCROW_CREATED,
+        escrow_trade_ref=(escrow_trade_ref or trade.get('escrow_trade_ref') or onchain.get('tx_hash', '')),
+        add_tx_hash=onchain.get('tx_hash')
+    )
+    STORAGE_DB.record_escrow_event({
+        'trade_id': trade_id,
+        'event_type': 'escrow_created',
+        'tx_hash': onchain.get('tx_hash', ''),
+        'block_number': onchain.get('block_number', 0),
+        'chain_id': EVM_CHAIN_ID,
+        'payload': {'request_id': request_id, 'external_submission': True, 'verified': onchain.get('verified', False)}
+    })
+    append_audit_event('escrow_created', client['client_id'], trade_id, request_id=request_id)
+    trade = STORAGE_DB.get_trade(trade_id) or trade
+    trade['escrow_tx'] = onchain
+    return trade
+
+def otc_settle_trade(client: Dict[str, Any], trade_id: str, tx_hash: str, request_id: str = '') -> Dict[str, Any]:
+    trade = STORAGE_DB.get_trade(trade_id)
+    if not trade:
+        raise ValueError("trade_not_found")
+    if trade.get('status') not in (TRADE_STATUS_ESCROW_CREATED, TRADE_STATUS_FUNDED):
+        raise ValueError("trade_not_settle_ready")
+    if not _trade_actor_allowed(client, trade):
+        raise PermissionError("actor_not_allowed_for_trade")
+    onchain = OTC_ESCROW.observe_external_tx(tx_hash)
+    STORAGE_DB.update_trade_state(trade_id, TRADE_STATUS_SETTLED, add_tx_hash=onchain.get('tx_hash'))
+    STORAGE_DB.record_escrow_event({
+        'trade_id': trade_id,
+        'event_type': 'trade_settled',
+        'tx_hash': onchain.get('tx_hash', ''),
+        'block_number': onchain.get('block_number', 0),
+        'chain_id': EVM_CHAIN_ID,
+        'payload': {'request_id': request_id, 'external_submission': True, 'verified': onchain.get('verified', False)}
+    })
+    append_audit_event('trade_settled', client['client_id'], trade_id, request_id=request_id)
+    trade = STORAGE_DB.get_trade(trade_id) or trade
+    trade['settlement_tx'] = onchain
+    return trade
+
+def otc_refund_trade(client: Dict[str, Any], trade_id: str, tx_hash: str, request_id: str = '') -> Dict[str, Any]:
+    trade = STORAGE_DB.get_trade(trade_id)
+    if not trade:
+        raise ValueError("trade_not_found")
+    if trade.get('status') in (TRADE_STATUS_SETTLED, TRADE_STATUS_REFUNDED, TRADE_STATUS_CANCELLED):
+        raise ValueError("trade_not_refundable")
+    if not _trade_actor_allowed(client, trade):
+        raise PermissionError("actor_not_allowed_for_trade")
+    onchain = OTC_ESCROW.observe_external_tx(tx_hash)
+    STORAGE_DB.update_trade_state(trade_id, TRADE_STATUS_REFUNDED, add_tx_hash=onchain.get('tx_hash'))
+    STORAGE_DB.record_escrow_event({
+        'trade_id': trade_id,
+        'event_type': 'trade_refunded',
+        'tx_hash': onchain.get('tx_hash', ''),
+        'block_number': onchain.get('block_number', 0),
+        'chain_id': EVM_CHAIN_ID,
+        'payload': {'request_id': request_id, 'external_submission': True, 'verified': onchain.get('verified', False)}
+    })
+    append_audit_event('trade_refunded', client['client_id'], trade_id, request_id=request_id)
+    trade = STORAGE_DB.get_trade(trade_id) or trade
+    trade['refund_tx'] = onchain
+    return trade
+
 # ===== LOGGING =====
 _LEVELS = {'DEBUG': 10, 'INFO': 20, 'WARN': 30, 'ERROR': 40}
 _metrics = {
@@ -1486,77 +1875,6 @@ def verify_audit_log() -> Tuple[bool, int]:
         return False, count
     return True, count
 
-# ===== METERING & BILLING (with Access Release Token) =====
-def generate_access_release_token(instruction_id: str, origin: str, destination: str) -> str:
-    """
-    Generate cryptographic Access Release Token (ART).
-    Proves that reconstruction is cryptographically authorized.
-    """
-    if not node_id:
-        get_node_id()
-    timestamp = int(time.time())
-    payload = f"{instruction_id}|{origin}|{destination}|{timestamp}|{node_id}"
-    return sha256(payload.encode()).hexdigest()
-
-def record_metering_event(instruction_id: str, client_id: str, access_release_token: Optional[str] = None):
-    """
-    Record billable event with cryptographic signature and Access Release Token.
-    Immutable proof for billing disputes.
-    Price: $0.02 per instruction reconstructed.
-    """
-    if not node_id:
-        get_node_id()
-    if access_release_token is None:
-        access_release_token = generate_access_release_token(instruction_id, client_id, 'destination')
-    event = {
-        'instruction_id': instruction_id,
-        'client_id': client_id,
-        'timestamp': int(time.time() * 1000),
-        'node_id': node_id,
-        'event_type': 'instruction_reconstructed',
-        'billable': True,
-        'price_usd': 0.02,
-        'access_release_token': access_release_token
-    }
-    
-    # Cryptographic signature (proof of billing)
-    event_str = json.dumps(event, sort_keys=True)
-    event['signature'] = sha256(
-        (event_str + node_id + str(event['timestamp'])).encode()
-    ).hexdigest()
-    
-    # Persist metering event
-    try:
-        STORAGE_DB.record_metering(event)
-        print(f'[METERING] [OK] Billable event: {instruction_id} (${event["price_usd"]}) [ART: {access_release_token[:16]}...]')
-    except Exception as e:
-        print(f'[METERING] [X] Failed to record: {e}')
-
-def get_billing_report(client_id: str, start_time: int, end_time: int) -> Dict:
-    """
-    Generate billing report for client
-    Returns: instruction count x $0.02
-    """
-    count = 0
-    events = []
-    try:
-        events = STORAGE_DB.list_metering_events(client_id, start_time, end_time)
-        for event in events:
-            if event.get('billable', False):
-                count += 1
-    except Exception as e:
-        print(f'[BILLING] Error reading metering: {e}')
-    
-    return {
-        'client_id': client_id,
-        'period_start': start_time,
-        'period_end': end_time,
-        'total_instructions': count,
-        'price_per_instruction': 0.02,
-        'amount_due_usd': round(count * 0.02, 2),
-        'events': events[:10]  # Sample (first 10)
-    }
-
 # ===== UTILITY FUNCTIONS =====
 def get_node_id() -> str:
     """Get or create unique node ID"""
@@ -1658,17 +1976,21 @@ def parse_reconstructed_instruction(instr_json: str) -> Dict[str, Any]:
 def print_status():
     """Display node status"""
     print('\n' + '='*47)
-    print('  ONESEAM ENTERPRISE NODE STATUS')
+    print('  ONESEAM OTC NODE STATUS')
     print('='*47)
     print(f'Node ID: {node_id[:16]}...')
     relay_status = 'Blind Relay ON' if BLIND_RELAY_ENABLED else 'Blind Relay OFF'
     print(f'Transport: {TRANSPORT_MODE} | Quorum: {DEFAULT_QUORUM_K}-of-{DEFAULT_QUORUM_N} | {relay_status}')
-    print(f'SEAM Protocol: v1.0 (enabled)')
+    print('Domain: OTC P2P Trading (RFQ/Trade/Escrow)')
     shard_count = len(list_shards())
     manifest_count = len(list_manifest_records())
+    rfq_count = len(STORAGE_DB.list_rfqs())
+    trade_count = len(STORAGE_DB.list_trades())
     print(f'Storage: db_backend={DB_BACKEND}')
     print(f'Shards: {shard_count}')
-    print(f'Instructions: {manifest_count}')
+    print(f'Private instructions: {manifest_count}')
+    print(f'RFQs: {rfq_count}')
+    print(f'Trades: {trade_count}')
     
     with neighbors_lock:
         count = len(neighbors)
@@ -1685,7 +2007,7 @@ def print_status():
                 last = info.get('last_seen', '-')
                 print(f'  - {nid[:8]}... @ {ip}:{port} | serves: {served_str} | region: {region} | seen {last}')
 
-# ===== FINANCIAL INSTRUCTION =====
+# ===== PRIVATE OTC PAYLOAD =====
 def generate_instruction_id() -> str:
     """Generate unique instruction ID"""
     timestamp = int(time.time())
@@ -1703,29 +2025,7 @@ def create_financial_instruction(
     data_region: Optional[str] = None,
     compliance_frameworks: Optional[List[str]] = None
 ) -> Dict:
-    """
-    Create financial settlement instruction (legacy format)
-    
-    For SEAM-compliant instructions, use:
-    - create_seam_payment_obligation()
-    - create_seam_invoice()
-    - create_seam_letter_of_credit()
-    - create_seam_purchase_order()
-    
-    Args:
-        payload: Settlement message (e.g., "SETTLE ORDER #12345")
-        origin: Source institution ID
-        destination: Target institution ID
-        encryption_key: Optional AES-256 key
-        quorum_k: Minimum shards for reconstruction (default: config or 2)
-        quorum_n: Total shards (default: config or 3)
-        jurisdiction: Legal jurisdiction (e.g., "EU", "BR")
-        data_region: Data sovereignty region (e.g., "EU", "BR")
-        compliance_frameworks: List of frameworks (e.g., ["GDPR", "LGPD"])
-    
-    Returns:
-        Instruction dict with metadata
-    """
+    """Create private OTC payload envelope for sharded P2P distribution."""
     instruction_id = generate_instruction_id()
     timestamp = int(time.time())
     
@@ -1775,9 +2075,6 @@ def create_instruction_manifest(instr: Dict, shards: List, encrypted_payload_b64
     k = quorum_k or instr.get('quorum_k', DEFAULT_QUORUM_K)
     n = quorum_n or instr.get('quorum_n', DEFAULT_QUORUM_N)
     
-    # Check if SEAM-compliant
-    is_seam = SEAMValidator.is_seam_compliant(instr)
-    
     manifest = {
         'instruction_id': instr['instruction_id'],
         'timestamp': instr['timestamp'],
@@ -1796,10 +2093,7 @@ def create_instruction_manifest(instr: Dict, shards: List, encrypted_payload_b64
         'compliance_frameworks': instr.get('compliance_frameworks', []),
         'sharding_mode': 'sss' if (encrypted_payload_b64 and shard_dicts) else 'legacy',
         'encrypted_payload_b64': encrypted_payload_b64,
-        'shard_indices': [s['index'] for s in (shard_dicts or [])],
-        'seam_compliant': is_seam,
-        'seam_type': instr.get('seam_type'),
-        'seam_version': instr.get('seam_version')
+        'shard_indices': [s['index'] for s in (shard_dicts or [])]
     }
     
     # Log creation event
@@ -1807,8 +2101,7 @@ def create_instruction_manifest(instr: Dict, shards: List, encrypted_payload_b64
         'event': 'instruction_created',
         'instruction_id': instr['instruction_id'],
         'timestamp': instr['timestamp'],
-        'node_id': node_id,
-        'seam_compliant': is_seam
+        'node_id': node_id
     }
     log_entry['signature'] = sign_log_entry(log_entry, node_id)
     manifest['log'].append(log_entry)
@@ -1844,8 +2137,7 @@ def append_log_to_manifest(instruction_id: str, event: str, node_id_override: st
         print(f'[AUDIT] Failed to log event: {e}')
 
 # ===== QUORUM RECONSTRUCTION (k-of-n) =====
-def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None,
-                           access_release_token: Optional[str] = None) -> Optional[Dict]:
+def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None) -> Optional[Dict]:
     """
     Byzantine fault-tolerant reconstruction (k-of-n).
     Supports both SSS (zero-knowledge) and legacy sharding.
@@ -1853,7 +2145,6 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
     Args:
         instruction_id: Instruction to reconstruct
         threshold: Minimum shards needed (default: from manifest)
-        access_release_token: Cryptographic ART for billing proof
     
     Returns:
         Reconstructed instruction or None if quorum not met
@@ -1966,22 +2257,7 @@ def reconstruct_with_quorum(instruction_id: str, threshold: Optional[int] = None
         else:
             print('[QUORUM] Integrity verification skipped (no payload)')
     
-    # Validate SEAM compliance if applicable
-    if manifest.get('seam_compliant'):
-        is_valid, error = SEAMValidator.validate(instruction)
-        if is_valid:
-            print(f'[QUORUM] [OK] SEAM validation passed (type: {instruction.get("seam_type")})')
-        else:
-            print(f'[QUORUM] [WARN] SEAM validation warning: {error}')
-    
-    # Generate ART if not provided
-    if access_release_token is None:
-        access_release_token = generate_access_release_token(
-            instruction_id, instruction.get('origin', 'unknown'), manifest.get('destination', ''))
-    
-    # Record metering event with ART
-    record_metering_event(instruction_id, instruction.get('origin', 'unknown'), access_release_token)
-    
+    # Legacy billing hooks are intentionally disabled in OTC mode.
     append_log_to_manifest(instruction_id, 'instruction_reconstructed')
     metric_inc('instructions_reconstructed_total')
     print(f'[QUORUM] [OK] Instruction reconstructed successfully')
@@ -2326,7 +2602,7 @@ async def broadcast_presence_async():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     s.setblocking(False)
     
-    capabilities = ['storage', 'reconstruction', 'routing', 'seam_v1']
+    capabilities = ['storage', 'reconstruction', 'routing', 'otc_v1']
     if TRANSPORT_MODE in ('OFF_GRID', 'HYBRID'):
         capabilities.append('mesh')
     
@@ -2483,7 +2759,7 @@ async def bootstrap_seeds():
             'cmd': CMD_HANDSHAKE,
             'node_id': node_id,
             'node_port': NODE_PORT,
-            'capabilities': ['storage', 'reconstruction', 'routing', 'seam_v1'],
+            'capabilities': ['storage', 'reconstruction', 'routing', 'otc_v1'],
             'version': '2.0',
             'transport_mode': TRANSPORT_MODE,
             'region': CONFIG.get('region', ''),
@@ -2512,7 +2788,7 @@ async def local_test_discovery_async():
                 'cmd': CMD_HANDSHAKE,
                 'node_id': node_id,
                 'node_port': NODE_PORT,
-                'capabilities': ['storage', 'reconstruction', 'routing', 'seam_v1'],
+                'capabilities': ['storage', 'reconstruction', 'routing', 'otc_v1'],
                 'version': '2.0',
                 'transport_mode': TRANSPORT_MODE,
                 'region': CONFIG.get('region', ''),
@@ -2768,7 +3044,7 @@ async def handle_client_async(reader: asyncio.StreamReader, writer: asyncio.Stre
                 'status': 'OK',
                 'node_id': node_id,
                 'version': '2.0',
-                'seam_version': '1.0',
+                'domain': 'otc_p2p_trading',
                 'uptime': int(time.time())
             })
             writer.write(response.encode())
@@ -2883,359 +3159,192 @@ def handle_shutdown(signum, frame):
     print('[SHUTDOWN] Node stopped.')
     raise SystemExit(0)
 
-# ===== CLI OPERATIONS =====
-def send_instruction():
-    """CLI: Send new financial instruction"""
-    print('\n' + '='*47)
-    print('  NEW FINANCIAL INSTRUCTION')
-    print('='*47)
-    
-    print('\nSelect instruction type:')
-    print('  1. SEAM Payment Obligation')
-    print('  2. SEAM Invoice')
-    print('  3. SEAM Letter of Credit')
-    print('  4. SEAM Purchase Order')
-    print('  5. Legacy (free-form message)')
-    
-    choice = input('\nSelect (1-5): ').strip()
-    
-    origin = input('Origin institution ID: ').strip() or 'BANK_DEMO'
-    destination = input('Destination institution ID: ').strip() or 'BANK_TARGET'
-    
-    # Optional encryption for all SEAM types (1-4) and Legacy (5)
-    use_crypto = input('Encrypt? (y/n): ').strip().lower() == 'y'
-    encryption_key = None
-    if use_crypto:
-        encryption_key = getpass('Encryption password: ')
-    
-    if choice == '1':
-        # SEAM Payment Obligation
-        amount = float(input('Amount: ').strip() or '0')
-        currency = input('Currency (USD/EUR/BRL): ').strip().upper() or 'USD'
-        due_days = int(input('Due in days (default 90): ').strip() or '90')
-        due_date = int(time.time()) + (due_days * 24 * 3600)
-        terms = input('Terms (optional): ').strip() or None
-        
-        instr = create_seam_payment_obligation(
-            amount=amount,
-            currency=currency,
-            creditor=destination,
-            debtor=origin,
-            due_date=due_date,
-            terms=terms
-        )
-        instr['origin'] = origin
-        instr['destination'] = destination
-        
-    elif choice == '2':
-        # SEAM Invoice
-        amount = float(input('Amount: ').strip() or '0')
-        currency = input('Currency (USD/EUR/BRL): ').strip().upper() or 'USD'
-        invoice_number = input('Invoice number: ').strip() or f'INV-{int(time.time())}'
-        due_days = int(input('Due in days (default 30): ').strip() or '30')
-        due_date = int(time.time()) + (due_days * 24 * 3600)
-        
-        instr = create_seam_invoice(
-            amount=amount,
-            currency=currency,
-            creditor=destination,
-            debtor=origin,
-            invoice_number=invoice_number,
-            due_date=due_date
-        )
-        instr['origin'] = origin
-        instr['destination'] = destination
-        
-    elif choice == '3':
-        # SEAM Letter of Credit
-        amount = float(input('Amount: ').strip() or '0')
-        currency = input('Currency (USD/EUR/BRL): ').strip().upper() or 'USD'
-        issuing_bank = input('Issuing bank: ').strip() or origin
-        beneficiary_bank = input('Beneficiary bank: ').strip() or destination
-        expiry_days = int(input('Expiry in days (default 180): ').strip() or '180')
-        expiry_date = int(time.time()) + (expiry_days * 24 * 3600)
-        terms = input('Terms: ').strip() or 'Payment upon presentation of documents'
-        
-        instr = create_seam_letter_of_credit(
-            amount=amount,
-            currency=currency,
-            creditor=destination,
-            debtor=origin,
-            issuing_bank=issuing_bank,
-            beneficiary_bank=beneficiary_bank,
-            expiry_date=expiry_date,
-            terms=terms
-        )
-        instr['origin'] = origin
-        instr['destination'] = destination
-        
-    elif choice == '4':
-        # SEAM Purchase Order
-        amount = float(input('Amount: ').strip() or '0')
-        currency = input('Currency (USD/EUR/BRL): ').strip().upper() or 'USD'
-        po_number = input('PO number: ').strip() or f'PO-{int(time.time())}'
-        delivery_days = int(input('Delivery in days (default 60): ').strip() or '60')
-        delivery_date = int(time.time()) + (delivery_days * 24 * 3600)
-        
-        instr = create_seam_purchase_order(
-            amount=amount,
-            currency=currency,
-            creditor=destination,
-            debtor=origin,
-            po_number=po_number,
-            delivery_date=delivery_date,
-            items=[{'description': 'As specified', 'quantity': 1}]
-        )
-        instr['origin'] = origin
-        instr['destination'] = destination
-        
-    else:
-        # Legacy
-        payload = input('Settlement message: ').strip()
-        if not payload:
-            print('[!] Empty message. Cancelled.')
-            return
-        
-        instr = create_financial_instruction(payload, origin, destination, encryption_key)
-    
-    print(f'\n[[OK]] Instruction created: {instr["instruction_id"]}')
-    
-    # Encrypt payload if requested (do not encrypt the entire instruction)
-    if use_crypto and encryption_key and 'payload' in instr:
-        if not instr.get('encrypted', False):
-            instr['payload'] = encrypt_payload_aes256(instr['payload'], encryption_key)
-            instr['encrypted'] = True
-    
-    # Display SEAM validation if applicable
-    if SEAMValidator.is_seam_compliant(instr):
-        print(f'[[OK]] SEAM-compliant: {instr.get("seam_type")}')
-        print(f'    Amount: {instr.get("currency")} {instr.get("amount"):,.2f}')
-        print(f'    Creditor: {instr.get("creditor")}')
-        print(f'    Debtor: {instr.get("debtor")}')
-    
-    k, n = instr.get('quorum_k', 2), instr.get('quorum_n', 3)
-    if not SSS_AVAILABLE:
-        k = n
-    instr_json = json.dumps(instr, ensure_ascii=False)
-    
-    if SSS_AVAILABLE:
-        encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
-        manifest = create_instruction_manifest(instr, [], encrypted_payload_b64=encrypted_b64,
-                                              shard_dicts=shard_dicts, quorum_k=k, quorum_n=n)
-        manifest['shards'] = [f'{instr["instruction_id"]}_shard{s["index"]}_v{r+1}.json'
-                             for s in shard_dicts for r in range(3)]
-        distribute_shards_smart(shard_dicts, instr['instruction_id'], destination, manifest, k, n, use_sss=True)
-    else:
-        shards = split_text(instr_json, n)
-        manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
-        manifest['shards'] = [f'{instr["instruction_id"]}_shard{i+1}_v{r+1}.json'
-                             for i in range(n) for r in range(3)]
-        distribute_shards_smart(shards, instr['instruction_id'], destination, manifest, k, n, use_sss=False)
-    
-    print(f'\n[[OK]] Instruction dispatched to network')
-    print(f'[i] Destination: {destination}')
-    print(f'[i] Quorum: {k}-of-{n} shards required for reconstruction')
+# ===== OTC CLI OPERATIONS =====
+def _cli_otc_client(client_id: str) -> Dict[str, Any]:
+    return {'client_id': client_id, 'roles': ['admin'], 'scopes': ['*'], 'claims': {}}
 
-def monitor_instructions():
-    """CLI: Monitor received instructions"""
-    print('\n' + '='*47)
-    print('  RECEIVED INSTRUCTIONS')
-    print('='*47)
-    
-    manifests = list_manifest_records()
-    
-    if not manifests:
-        print('[i] No instructions received yet.')
+def _cli_auto_bind_wallet(client_id: str, wallet: str):
+    wallet_norm = _normalize_wallet(wallet)
+    if not wallet_norm:
         return
-    
-    for m in manifests:
-        instr_id = m['instruction_id']
-        k = m.get('quorum_k', m.get('quorum_threshold', 2))
-        n = m.get('quorum_n', m.get('total_shards', 3))
-        shard_indices = m.get('shard_indices', list(range(1, n + 1)))
-        
-        # Count available shards (unique indices for SSS)
-        seen = set()
-        for shard_idx in shard_indices:
-            for replica in range(1, 4):
-                shard_name = f'{instr_id}_shard{shard_idx}_v{replica}.json'
-                d = get_shard_record(shard_name)
-                if d:
-                    idx = d.get('index', shard_idx)
-                    seen.add(idx)
-                    break
-        available = len(seen)
-        
-        status = '[OK] Ready' if available >= k else f'[PENDING] ({available}/{k})'
-        seam_badge = f' [SEAM: {m.get("seam_type")}]' if m.get('seam_compliant') else ''
-        
-        print(f'{instr_id}: {status}{seam_badge}')
-        print(f'  Origin: {m.get("origin")} -> Destination: {m.get("destination")}')
-        print(f'  Encrypted: {m.get("encrypted", False)}')
-        print()
+    if WALLET_BINDING_REQUIRED and not STORAGE_DB.wallet_bound(client_id, wallet_norm, EVM_CHAIN_ID):
+        STORAGE_DB.bind_wallet(client_id, wallet_norm, EVM_CHAIN_ID, status='active')
+        print(f'[OTC] Wallet bound: {client_id} -> {wallet_norm}')
 
-def rebuild_instruction():
-    """CLI: Reconstruct instruction with quorum"""
+def cli_create_rfq():
     print('\n' + '='*47)
-    print('  RECONSTRUCT INSTRUCTION')
+    print('  CREATE RFQ')
     print('='*47)
-    
-    manifests = list_manifest_records()
-    
-    if not manifests:
-        print('[!] No instructions available.')
-        return
-    
-    print('Available instructions:')
-    for i, m in enumerate(sorted(manifests, key=lambda x: x['timestamp']), 1):
-        seam_badge = f' [SEAM: {m.get("seam_type")}]' if m.get('seam_compliant') else ''
-        print(f'  {i}. {m["instruction_id"]}{seam_badge}')
-        print(f'     {m.get("origin")} -> {m.get("destination")}')
-    
-    try:
-        choice = int(input('\nSelect instruction number: ').strip())
-        manifest = sorted(manifests, key=lambda x: x['timestamp'])[choice - 1]
-    except:
-        print('[!] Invalid selection.')
-        return
-    
-    instruction_id = manifest['instruction_id']
-    k = manifest.get('quorum_k', manifest.get('quorum_threshold', 2))
-    
-    # Try dynamic collection if quorum not met locally
-    collect_shards_dynamically(instruction_id, max_attempts=3)
-    
-    # Attempt reconstruction with quorum
-    instr = reconstruct_with_quorum(instruction_id, threshold=k)
-    
-    if not instr:
-        print('\n[[X]] Reconstruction failed. Waiting for more shards...')
-        return
-    
-    # Decrypt if needed
-    if instr.get('encrypted'):
-        decrypt = input('\nDecrypt payload<- (y/n): ').strip().lower() == 'y'
-        if decrypt:
-            key = getpass('Decryption key: ')
-            try:
-                instr['payload'] = decrypt_payload_aes256(instr['payload'], key)
-                print('[[OK]] Payload decrypted')
-            except Exception as e:
-                print(f'[[X]] Decryption failed: {e}')
-    
-    # Display
-    print('\n' + '='*47)
-    print('  RECONSTRUCTED INSTRUCTION')
-    print('='*47)
-    
-    # Pretty print SEAM fields if applicable
-    if SEAMValidator.is_seam_compliant(instr):
-        print(f'\n[SEAM] Type: {instr.get("seam_type")}')
-        print(f'[SEAM] Amount: {instr.get("currency")} {instr.get("amount"):,.2f}')
-        print(f'[SEAM] Creditor: {instr.get("creditor")}')
-        print(f'[SEAM] Debtor: {instr.get("debtor")}')
-        if instr.get('due_date'):
-            due_str = datetime.fromtimestamp(instr['due_date']).strftime('%Y-%m-%d')
-            print(f'[SEAM] Due Date: {due_str}')
-        if instr.get('terms'):
-            print(f'[SEAM] Terms: {instr["terms"]}')
-        print()
-    
-    print(json.dumps(instr, indent=2, ensure_ascii=False))
+    maker_client_id = input('Maker client ID: ').strip()
+    maker_wallet = input('Maker wallet (0x...): ').strip()
+    maker_side = (input('Maker side (buy/sell) [sell]: ').strip().lower() or 'sell')
+    base_asset = input('Base asset (e.g. BTC): ').strip().upper()
+    quote_asset = input('Quote asset (e.g. USDT): ').strip().upper()
+    base_amount = float(input('Base amount: ').strip())
+    quote_amount = float(input('Quote amount: ').strip())
+    taker_client_id = input('Taker client ID (optional): ').strip()
+    expires_in_seconds = int(input('Expires in seconds [900]: ').strip() or '900')
+    _cli_auto_bind_wallet(maker_client_id, maker_wallet)
+    rfq = otc_create_rfq(_cli_otc_client(maker_client_id), {
+        'maker_wallet': maker_wallet,
+        'base_asset': base_asset,
+        'quote_asset': quote_asset,
+        'base_amount': base_amount,
+        'quote_amount': quote_amount,
+        'maker_side': maker_side,
+        'taker_client_id': taker_client_id,
+        'expires_in_seconds': expires_in_seconds
+    })
+    print(f'[OK] RFQ created: {rfq["rfq_id"]}')
 
-def audit_logs():
-    """CLI: View audit trail"""
+def cli_accept_rfq():
     print('\n' + '='*47)
-    print('  AUDIT TRAIL')
+    print('  ACCEPT RFQ')
     print('='*47)
-    
-    for manifest in list_manifest_records():
-        try:
-            seam_badge = f' [SEAM: {manifest.get("seam_type")}]' if manifest.get('seam_compliant') else ''
-            print(f"\nInstruction: {manifest['instruction_id']}{seam_badge}")
-            print(f"Origin: {manifest.get('origin')} -> Destination: {manifest.get('destination')}")
-            
-            for entry in manifest.get('log', []):
-                print(f"  - {entry['event']}")
-                print(f"    Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(entry['timestamp']))}")
-                print(f"    Node: {entry.get('node_id', 'unknown')[:16]}...")
-                print(f"    Signature: {entry.get('signature', '')[:24]}...")
-                
-        except Exception as e:
-            print(f'[!] Error reading manifest: {e}')
+    rfq_id = input('RFQ ID: ').strip()
+    taker_client_id = input('Taker client ID: ').strip()
+    taker_wallet = input('Taker wallet (0x...): ').strip()
+    _cli_auto_bind_wallet(taker_client_id, taker_wallet)
+    trade = otc_accept_rfq(_cli_otc_client(taker_client_id), rfq_id, taker_wallet)
+    print(f'[OK] Trade created from RFQ: {trade["trade_id"]}')
 
-def view_billing():
-    """CLI: View billing report"""
+def cli_create_trade():
     print('\n' + '='*47)
-    print('  BILLING REPORT')
+    print('  CREATE DIRECT TRADE')
     print('='*47)
-    
-    client_id = input('Client ID (or press Enter for all): ').strip()
-    
-    # Last 30 days
-    end_time = int(time.time())
-    start_time = end_time - (30 * 24 * 3600)
-    
-    if client_id:
-        report = get_billing_report(client_id, start_time, end_time)
-        print(f"\nClient: {report['client_id']}")
-        print(f"Instructions: {report['total_instructions']}")
-        print(f"Amount Due: ${report['amount_due_usd']:.2f} USD")
-    else:
-        # All clients
-        all_clients = set(STORAGE_DB.list_metering_clients())
-        
-        total_revenue = 0
-        for cid in all_clients:
-            report = get_billing_report(cid, start_time, end_time)
-            print(f"\n{cid}:")
-            print(f"  Instructions: {report['total_instructions']}")
-            print(f"  Amount: ${report['amount_due_usd']:.2f}")
-            total_revenue += report['amount_due_usd']
-        
-        print(f"\n{'='*40}")
-        print(f"TOTAL REVENUE: ${total_revenue:.2f} USD")
+    actor = input('Actor client ID (buyer/seller/admin): ').strip()
+    buyer_client_id = input('Buyer client ID: ').strip()
+    buyer_wallet = input('Buyer wallet (0x...): ').strip()
+    seller_client_id = input('Seller client ID: ').strip()
+    seller_wallet = input('Seller wallet (0x...): ').strip()
+    base_asset = input('Base asset: ').strip().upper()
+    quote_asset = input('Quote asset: ').strip().upper()
+    base_amount = float(input('Base amount: ').strip())
+    quote_amount = float(input('Quote amount: ').strip())
+    _cli_auto_bind_wallet(buyer_client_id, buyer_wallet)
+    _cli_auto_bind_wallet(seller_client_id, seller_wallet)
+    trade = otc_create_trade_direct(_cli_otc_client(actor), {
+        'buyer_client_id': buyer_client_id,
+        'buyer_wallet': buyer_wallet,
+        'seller_client_id': seller_client_id,
+        'seller_wallet': seller_wallet,
+        'base_asset': base_asset,
+        'quote_asset': quote_asset,
+        'base_amount': base_amount,
+        'quote_amount': quote_amount
+    })
+    print(f'[OK] Direct trade created: {trade["trade_id"]}')
+
+def cli_create_escrow():
+    print('\n' + '='*47)
+    print('  CREATE ESCROW')
+    print('='*47)
+    trade_id = input('Trade ID: ').strip()
+    actor = input('Actor client ID: ').strip()
+    tx_hash = input('Escrow tx_hash (0x...): ').strip()
+    escrow_trade_ref = input('Escrow trade ref (optional): ').strip() or None
+    trade = otc_create_escrow(_cli_otc_client(actor), trade_id, tx_hash=tx_hash, escrow_trade_ref=escrow_trade_ref)
+    print(f'[OK] Escrow created: trade={trade_id}')
+
+def cli_settle_trade():
+    print('\n' + '='*47)
+    print('  SETTLE TRADE')
+    print('='*47)
+    trade_id = input('Trade ID: ').strip()
+    actor = input('Actor client ID: ').strip()
+    tx_hash = input('Settlement tx_hash (0x...): ').strip()
+    trade = otc_settle_trade(_cli_otc_client(actor), trade_id, tx_hash=tx_hash)
+    print(f'[OK] Trade settled: trade={trade_id}')
+
+def cli_refund_trade():
+    print('\n' + '='*47)
+    print('  REFUND TRADE')
+    print('='*47)
+    trade_id = input('Trade ID: ').strip()
+    actor = input('Actor client ID: ').strip()
+    tx_hash = input('Refund tx_hash (0x...): ').strip()
+    trade = otc_refund_trade(_cli_otc_client(actor), trade_id, tx_hash=tx_hash)
+    print(f'[OK] Trade refunded: trade={trade_id}')
+
+def monitor_otc_trades():
+    print('\n' + '='*47)
+    print('  OTC TRADES')
+    print('='*47)
+    client_filter = input('Client ID filter (optional): ').strip() or None
+    trades = STORAGE_DB.list_trades(client_filter)
+    if not trades:
+        print('No OTC trades found.')
+        return
+    for trade in trades[:50]:
+        print(f"- {trade['trade_id']} | {trade['base_asset']}/{trade['quote_asset']} | {trade['status']} | "
+              f"{trade['buyer_client_id']} <-> {trade['seller_client_id']} | fee={trade['fee_amount']} {trade['fee_asset']}")
+
+def audit_otc():
+    print('\n' + '='*47)
+    print('  OTC AUDIT')
+    print('='*47)
+    events = STORAGE_DB.list_audit_events()
+    if not events:
+        print('No audit events.')
+        return
+    interesting = {'rfq_created', 'rfq_accepted', 'trade_created', 'escrow_created', 'trade_settled', 'trade_refunded', 'wallet_bound'}
+    count = 0
+    for event in reversed(events):
+        if event.get('event_type') not in interesting:
+            continue
+        count += 1
+        print(f"- {event.get('event_type')} | actor={event.get('actor')} | instruction_id={event.get('instruction_id')} | ts={event.get('timestamp')}")
+        if count >= 100:
+            break
+    if count == 0:
+        print('No OTC-specific audit events.')
 
 # ===== CLI MENU =====
 def cli_menu():
-    """Interactive CLI menu"""
+    """Interactive OTC CLI menu"""
     while True:
         print('\n' + '='*47)
-        print('  ONESEAM ENTERPRISE NODE')
+        print('  ONESEAM OTC NODE')
         print('='*47)
         print('  1. Node Status')
-        print('  2. Send Financial Instruction')
-        print('  3. Monitor Received Instructions')
-        print('  4. Collect Shards Dynamically')
-        print('  5. Reconstruct Instruction')
-        print('  6. Audit Logs')
-        print('  7. Billing Report')
-        print('  8. Exit')
-        
+        print('  2. Create RFQ')
+        print('  3. Accept RFQ')
+        print('  4. Create Trade')
+        print('  5. Create Escrow')
+        print('  6. Settle Trade')
+        print('  7. Refund Trade')
+        print('  8. Monitor OTC Trades')
+        print('  9. Audit OTC')
+        print('  10. Exit')
+
         choice = input('\nSelect option: ').strip()
-        
-        if choice == '1':
-            print_status()
-        elif choice == '2':
-            send_instruction()
-        elif choice == '3':
-            monitor_instructions()
-        elif choice == '4':
-            instruction_id = input('Instruction ID: ').strip()
-            if instruction_id:
-                collect_shards_dynamically(instruction_id)
-        elif choice == '5':
-            rebuild_instruction()
-        elif choice == '6':
-            audit_logs()
-        elif choice == '7':
-            view_billing()
-        elif choice == '8':
-            print('\n[SHUTDOWN] Stopping node...')
-            local_test_registry_cleanup()
-            raise SystemExit(0)
-        else:
-            print('[!] Invalid option.')
+        try:
+            if choice == '1':
+                print_status()
+            elif choice == '2':
+                cli_create_rfq()
+            elif choice == '3':
+                cli_accept_rfq()
+            elif choice == '4':
+                cli_create_trade()
+            elif choice == '5':
+                cli_create_escrow()
+            elif choice == '6':
+                cli_settle_trade()
+            elif choice == '7':
+                cli_refund_trade()
+            elif choice == '8':
+                monitor_otc_trades()
+            elif choice == '9':
+                audit_otc()
+            elif choice == '10':
+                print('\n[SHUTDOWN] Stopping node...')
+                local_test_registry_cleanup()
+                raise SystemExit(0)
+            else:
+                print('[!] Invalid option.')
+        except Exception as e:
+            print(f'[X] Operation failed: {e}')
 
 # ===== ENTERPRISE REST API =====
 async def start_rest_api():
@@ -3311,7 +3420,7 @@ async def start_rest_api():
                 client = {
                     'client_id': legacy.get('client_id'),
                     'roles': legacy.get('roles', ['issuer']),
-                    'scopes': legacy.get('scopes', ['instruction:write', 'instruction:read'])
+                    'scopes': legacy.get('scopes', ['otc:rfq:write', 'otc:rfq:read', 'otc:trade:write', 'otc:trade:read', 'otc:settle'])
                 }
         if not client or not client.get('client_id'):
             metric_inc('auth_failed_total')
@@ -3339,9 +3448,10 @@ async def start_rest_api():
     async def health(request):
         return web.json_response({
             'status': 'healthy',
-            'service': 'Oneseam Enterprise Infrastructure',
+            'service': 'Oneseam OTC Infrastructure',
             'version': '2.0.0',
-            'seam_version': '1.0',
+            'domain': 'otc_p2p_trading',
+            'non_custodial': True,
             'node_id': node_id,
             'request_id': request['request_id']
         })
@@ -3363,167 +3473,238 @@ async def start_rest_api():
             return json_error(request, 404, 'metrics_disabled', 'Metrics disabled')
         return web.json_response({'request_id': request['request_id'], 'metrics': metrics_snapshot()})
 
-    async def create_payment_obligation_api(request):
-        await ensure_auth(request, required_scopes=['seam:write'], required_roles=['issuer', 'admin'])
+    def _map_otc_error(request, err: Exception):
+        msg = str(err)
+        if isinstance(err, PermissionError):
+            return json_error(request, 403, 'forbidden', msg or 'Forbidden')
+        if isinstance(err, ValueError):
+            code = msg if msg else 'invalid_request'
+            if code in ('rfq_not_found', 'trade_not_found'):
+                return json_error(request, 404, code, code)
+            return json_error(request, 400, code, code)
+        return json_error(request, 503, 'service_unavailable', msg or 'Service unavailable')
+
+    async def wallet_bind_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:write'], required_roles=['issuer', 'receiver', 'admin'])
         try:
             data = await request.json()
         except Exception:
             return json_error(request, 400, 'invalid_payload', 'Invalid payload')
         if PYDANTIC_AVAILABLE:
             try:
-                data = PaymentObligationRequest.model_validate(data).model_dump()
+                data = WalletBindRequest.model_validate(data).model_dump()
             except ValidationError as e:
                 return json_error(request, 400, 'invalid_payload', str(e))
-        if Decimal(str(data['amount'])) <= 0:
-            return json_error(request, 400, 'invalid_amount', 'Amount must be positive')
-        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
-        if cached:
-            return web.json_response(cached['payload'], status=cached['status'])
-        instr = create_seam_payment_obligation(
-            amount=data['amount'],
-            currency=data.get('currency', 'USD'),
-            creditor=data['creditor'],
-            debtor=data['debtor'],
-            due_date=data.get('due_date'),
-            terms=data.get('terms'),
-            reference=data.get('reference'),
-            interest_rate=data.get('interest_rate'),
-            jurisdiction=data.get('jurisdiction')
-        )
-        instr['origin'] = request['client']['client_id']
-        instr['destination'] = data['creditor']
-        append_audit_event('api_seam_payment_obligation', request['client']['client_id'], instr['instruction_id'], request_id=request['request_id'])
-        metric_inc('instructions_created_total')
-        k, n = DEFAULT_QUORUM_K, DEFAULT_QUORUM_N
-        if not SSS_AVAILABLE:
-            k = n
-        instr_json = json.dumps(instr)
-        if SSS_AVAILABLE:
-            encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
-            manifest = create_instruction_manifest(instr, [], encrypted_payload_b64=encrypted_b64,
-                                                  shard_dicts=shard_dicts, quorum_k=k, quorum_n=n)
-            manifest['shards'] = [f"{instr['instruction_id']}_shard{s['index']}_v{r+1}.json" for s in shard_dicts for r in range(3)]
-            distribute_shards_smart(shard_dicts, instr['instruction_id'], data['creditor'], manifest, k, n, use_sss=True)
-        else:
-            shards = split_text(instr_json, n)
-            manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
-            manifest['shards'] = [f"{instr['instruction_id']}_shard{i+1}_v{r+1}.json" for i in range(n) for r in range(3)]
-            distribute_shards_smart(shards, instr['instruction_id'], data['creditor'], manifest, k, n, use_sss=False)
-        payload = {
-            'instruction_id': instr['instruction_id'],
-            'seam_type': instr['seam_type'],
-            'status': 'dispatched',
-            'amount': instr['amount'],
-            'currency': instr['currency'],
-            'quorum': f'{k}-of-{n}',
-            'request_id': request['request_id']
-        }
-        idem_key = request.headers.get('Idempotency-Key', '').strip()
-        if idem_key:
-            idempotency_put(request['client']['client_id'], idem_key, payload, 201)
-        return web.json_response(payload, status=201)
+        chain_id = int(data.get('chain_id') or EVM_CHAIN_ID)
+        try:
+            result = otc_bind_wallet(request['client'], data.get('wallet_address', ''), chain_id)
+        except Exception as e:
+            return _map_otc_error(request, e)
+        result['request_id'] = request['request_id']
+        return web.json_response(result, status=201)
 
-    async def submit_instruction(request):
-        await ensure_auth(request, required_scopes=['instruction:write'], required_roles=['issuer', 'admin'])
+    async def otc_create_rfq_api(request):
+        await ensure_auth(request, required_scopes=['otc:rfq:write'], required_roles=['issuer', 'admin'])
         try:
             data = await request.json()
         except Exception:
             return json_error(request, 400, 'invalid_payload', 'Invalid payload')
         if PYDANTIC_AVAILABLE:
             try:
-                data = InstructionRequest.model_validate(data).model_dump()
+                data = OTCRFQCreateRequest.model_validate(data).model_dump()
             except ValidationError as e:
                 return json_error(request, 400, 'invalid_payload', str(e))
-        if not data.get('payload') or not data.get('destination'):
-            return json_error(request, 400, 'missing_fields', 'Missing payload or destination')
-        if len(data['payload']) > API_MAX_PAYLOAD_BYTES:
-            return json_error(request, 413, 'payload_too_large', 'Payload too large')
         cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
         if cached:
             return web.json_response(cached['payload'], status=cached['status'])
-        instr = create_financial_instruction(
-            payload=data['payload'],
-            origin=request['client']['client_id'],
-            destination=data['destination'],
-            encryption_key=data.get('encryption_key'),
-            jurisdiction=data.get('jurisdiction'),
-            data_region=data.get('data_region'),
-            compliance_frameworks=data.get('compliance_frameworks')
-        )
-        k, n = DEFAULT_QUORUM_K, DEFAULT_QUORUM_N
-        if not SSS_AVAILABLE:
-            k = n
-        instr_json = json.dumps(instr)
-        if SSS_AVAILABLE:
-            encrypted_b64, shard_dicts = shard_instruction(instr_json, k, n)
-            manifest = create_instruction_manifest(instr, [], encrypted_payload_b64=encrypted_b64,
-                                                  shard_dicts=shard_dicts, quorum_k=k, quorum_n=n)
-            manifest['shards'] = [f"{instr['instruction_id']}_shard{s['index']}_v{r+1}.json" for s in shard_dicts for r in range(3)]
-            distribute_shards_smart(shard_dicts, instr['instruction_id'], data['destination'], manifest, k, n, use_sss=True)
-        else:
-            shards = split_text(instr_json, n)
-            manifest = create_instruction_manifest(instr, shards, quorum_k=k, quorum_n=n)
-            manifest['shards'] = [f"{instr['instruction_id']}_shard{i+1}_v{r+1}.json" for i in range(n) for r in range(3)]
-            distribute_shards_smart(shards, instr['instruction_id'], data['destination'], manifest, k, n, use_sss=False)
-        append_audit_event('api_instruction_submit', request['client']['client_id'], instr['instruction_id'], request_id=request['request_id'])
-        metric_inc('instructions_created_total')
-        payload = {
-            'instruction_id': instr['instruction_id'],
-            'status': 'dispatched',
-            'shards': n * 3,
-            'quorum': f'{k}-of-{n}',
-            'request_id': request['request_id']
-        }
+        try:
+            rfq = otc_create_rfq(request['client'], data, request_id=request['request_id'])
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'rfq': rfq, 'request_id': request['request_id']}
         idem_key = request.headers.get('Idempotency-Key', '').strip()
         if idem_key:
             idempotency_put(request['client']['client_id'], idem_key, payload, 201)
         return web.json_response(payload, status=201)
 
-    async def get_instruction(request):
-        await ensure_auth(request, required_scopes=['instruction:read'], required_roles=['receiver', 'auditor', 'admin'])
-        instruction_id = request.match_info.get('instruction_id')
-        await collect_shards_dynamically_async(instruction_id, max_attempts=2)
-        result = reconstruct_with_quorum(instruction_id)
-        if result:
-            response = {
-                'instruction_id': instruction_id,
-                'status': 'reconstructed',
-                'quorum': 'achieved',
-                'request_id': request['request_id']
-            }
-            if SEAMValidator.is_seam_compliant(result):
-                response['seam_compliant'] = True
-                response['seam_type'] = result.get('seam_type')
-                response['amount'] = result.get('amount')
-                response['currency'] = result.get('currency')
-                response['creditor'] = result.get('creditor')
-                response['debtor'] = result.get('debtor')
-            else:
-                response['payload'] = result.get('payload') if not result.get('encrypted') else '[encrypted]'
-            return web.json_response(response)
-        return web.json_response({
-            'instruction_id': instruction_id,
-            'status': 'pending',
-            'quorum': 'not_achieved',
-            'request_id': request['request_id']
-        }, status=202)
+    async def otc_get_rfq_api(request):
+        await ensure_auth(request, required_scopes=['otc:rfq:read'], required_roles=['issuer', 'receiver', 'auditor', 'admin'])
+        rfq_id = request.match_info.get('rfq_id')
+        rfq = STORAGE_DB.get_rfq(rfq_id)
+        if not rfq:
+            return json_error(request, 404, 'rfq_not_found', 'rfq_not_found')
+        return web.json_response({'rfq': rfq, 'request_id': request['request_id']})
 
-    async def billing(request):
-        await ensure_auth(request, required_scopes=['billing:read'], required_roles=['auditor', 'admin'])
+    async def otc_accept_rfq_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:write'], required_roles=['issuer', 'receiver', 'admin'])
+        rfq_id = request.match_info.get('rfq_id')
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCRFQAcceptRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            trade = otc_accept_rfq(request['client'], rfq_id, data.get('taker_wallet', ''), request_id=request['request_id'])
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'trade': trade, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 201)
+        return web.json_response(payload, status=201)
+
+    async def otc_create_trade_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:write'], required_roles=['issuer', 'admin'])
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCTradeCreateRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            trade = otc_create_trade_direct(request['client'], data, request_id=request['request_id'])
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'trade': trade, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 201)
+        return web.json_response(payload, status=201)
+
+    async def otc_get_trade_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:read'], required_roles=['issuer', 'receiver', 'auditor', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        trade = STORAGE_DB.get_trade(trade_id)
+        if not trade:
+            return json_error(request, 404, 'trade_not_found', 'trade_not_found')
+        return web.json_response({'trade': trade, 'request_id': request['request_id']})
+
+    async def otc_create_escrow_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:write'], required_roles=['issuer', 'receiver', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCTradeActionRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        elif not data.get('tx_hash'):
+            return json_error(request, 400, 'invalid_payload', 'tx_hash is required')
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            trade = otc_create_escrow(
+                request['client'],
+                trade_id,
+                data.get('tx_hash', ''),
+                escrow_trade_ref=data.get('escrow_trade_ref'),
+                request_id=request['request_id']
+            )
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'trade': trade, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 200)
+        return web.json_response(payload)
+
+    async def otc_settle_trade_api(request):
+        await ensure_auth(request, required_scopes=['otc:settle'], required_roles=['issuer', 'receiver', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCTradeActionRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        elif not data.get('tx_hash'):
+            return json_error(request, 400, 'invalid_payload', 'tx_hash is required')
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            trade = otc_settle_trade(request['client'], trade_id, data.get('tx_hash', ''), request_id=request['request_id'])
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'trade': trade, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 200)
+        return web.json_response(payload)
+
+    async def otc_refund_trade_api(request):
+        await ensure_auth(request, required_scopes=['otc:settle'], required_roles=['issuer', 'receiver', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        try:
+            data = await request.json()
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCTradeActionRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        elif not data.get('tx_hash'):
+            return json_error(request, 400, 'invalid_payload', 'tx_hash is required')
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            trade = otc_refund_trade(request['client'], trade_id, data.get('tx_hash', ''), request_id=request['request_id'])
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'trade': trade, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 200)
+        return web.json_response(payload)
+
+    async def otc_fees_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:read'], required_roles=['issuer', 'receiver', 'auditor', 'admin'])
         start = int(request.query.get('start', 0))
-        end = int(request.query.get('end', time.time()))
-        report = get_billing_report(request['client']['client_id'], start, end)
-        report['request_id'] = request['request_id']
-        return web.json_response(report)
+        end = int(request.query.get('end', int(time.time() * 1000)))
+        fees = STORAGE_DB.list_trade_fee_events(request['client']['client_id'], start, end)
+        return web.json_response({
+            'client_id': request['client']['client_id'],
+            'fee_bps_default': OTC_DEFAULT_FEE_BPS,
+            'fees': fees,
+            'request_id': request['request_id']
+        })
 
     app.add_routes([
         web.get('/health', health),
         web.get('/ready', ready),
         web.get('/metrics', metrics),
-        web.post('/v1/seam/payment_obligation', create_payment_obligation_api),
-        web.post('/v1/instructions', submit_instruction),
-        web.get('/v1/instructions/{instruction_id}', get_instruction),
-        web.get('/v1/billing', billing),
+        web.post('/v1/otc/wallet/bind', wallet_bind_api),
+        web.post('/v1/otc/rfqs', otc_create_rfq_api),
+        web.get('/v1/otc/rfqs/{rfq_id}', otc_get_rfq_api),
+        web.post('/v1/otc/rfqs/{rfq_id}/accept', otc_accept_rfq_api),
+        web.post('/v1/otc/trades', otc_create_trade_api),
+        web.get('/v1/otc/trades/{trade_id}', otc_get_trade_api),
+        web.post('/v1/otc/trades/{trade_id}/escrow/create', otc_create_escrow_api),
+        web.post('/v1/otc/trades/{trade_id}/settle', otc_settle_trade_api),
+        web.post('/v1/otc/trades/{trade_id}/refund', otc_refund_trade_api),
+        web.get('/v1/otc/fees', otc_fees_api),
     ])
 
     ssl_context = None
@@ -3543,9 +3724,9 @@ async def start_rest_api():
 if __name__ == '__main__':
     print("""
 ===============================================
-  ONESEAM ENTERPRISE v2.0
-  Resilient Financial Settlement Messaging
-  SEAM Protocol v1.0 (enabled)
+  ONESEAM OTC v2.0
+  P2P OTC Trading with Zero-Knowledge Privacy
+  Non-Custodial RFQ + Trade + Escrow
 ===============================================
     """)
 
@@ -3565,8 +3746,8 @@ if __name__ == '__main__':
         if LOCAL_TEST_MODE:
             print('[INIT] Local test mode: ephemeral node ID enabled')
         print(f'[INIT] Storage: db_backend={DB_BACKEND}')
-        print(f'[INIT] SEAM Protocol: v1.0')
-        print(f'[INIT] Supported types: PAYMENT_OBLIGATION, INVOICE, LETTER_OF_CREDIT, PURCHASE_ORDER')
+        print(f'[INIT] OTC mode: enabled')
+        print(f'[INIT] Supported flow: RFQ -> Trade -> Escrow(tx_hash) -> Settle/Refund(tx_hash)')
 
         tasks = [
             asyncio.create_task(broadcast_presence_async()),
@@ -3592,3 +3773,4 @@ if __name__ == '__main__':
             await asyncio.to_thread(cli_menu)
 
     asyncio.run(main_async())
+

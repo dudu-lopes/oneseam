@@ -1,199 +1,144 @@
-# Oneseam Enterprise
+# Oneseam OTC
 
-Enterprise-grade resilient cryptographic messaging infrastructure for financial settlement instructions.
+P2P OTC trading infrastructure with zero-knowledge privacy.
 
-## Overview
+## Product Scope
 
-Oneseam operates exclusively on **transaction instructions (financial messages)**, not on assets or monetary values. Settlement occurs locally within participating institutions, in compliance with regulatory and data sovereignty requirements.
+Oneseam OTC is focused on **RFQ/Trade lifecycle and non-custodial escrow orchestration**.
+The platform preserves the core decentralized transport:
 
-### Key Features
+- UDP P2P discovery + seed bootstrap
+- Shamir Secret Sharing (k-of-n)
+- Byzantine quorum reconstruction
+- Ed25519 shard signatures
+- SQLite/PostgreSQL storage
+- REST API + CLI
 
-- **Zero-knowledge transport**: Each instruction is fragmented into cryptographically independent shards via Shamir Secret Sharing. No intermediate node has access to the complete instruction during transport.
+## Current Domain Model
 
-- **Byzantine fault-tolerant**: Configurable k-of-n quorum (e.g., 2-of-3, 4-of-7).
-
-- **On-grid / Off-grid**: Operates over traditional internet (on-grid) and mesh networks (off-grid) for infrastructure degradation scenarios.
-
-- **Access Release Token (ART)**: Cryptographic mechanism for billing proof and message access authorization.
-
-- **Data sovereignty**: Region-aware routing for GDPR, LGPD, and jurisdictional compliance.
-
-- **Transport security**: TLS for REST, optional mTLS for REST and P2P.
-
-- **Shard integrity**: Optional Ed25519 shard signing with verification.
-
-- **Audit trail**: Immutable hash-chained audit log stored in the DB.
-
-## The SEAM Protocol
-
-**SEAM (Settlement Evidence & Agreement Message)** is the logical layer that transforms Oneseam from encrypted messaging into economic infrastructure.
-
-Instead of transferring money, SEAM creates a **verifiable distributed financial obligation**. When an instruction is created, it receives:
-
-- Unique cryptographic ID
-- Immutable timestamp
-- Cryptographic integrity hash
-- Multi-node witness via shard distribution
-
-Multiple independent nodes witness the instruction's existence. Only a quorum can reconstruct it. **No single company, server, or bank needs to be trusted in isolation** - the network itself proves the commitment was issued.
-
-### Economic Function
-
-SEAM operates as a **programmable letter of credit**. The receiving party gains an **auditable economic asset** before payment occurs. This proof enables production, delivery, or financing based on the commitment, without requiring a central intermediary to guarantee the financial promise.
-
-**Example use case:**
-```
-Supplier receives SEAM instruction: "Pay $500k upon delivery"
--> Supplier uses SEAM as collateral to secure working capital loan
--> Supplier manufactures goods
--> Delivery triggers settlement (local, within institutions)
--> SEAM obligation fulfilled
-```
-
-The instruction itself becomes tradeable, financeable, and programmable - without moving funds through Oneseam.
-
-## Architecture
-```
-Origin Institution                    Destination Institution
-       |                                       |
-       |  Fragment (SSS)                       |  Collect shards dynamically
-       |  Distribute shards P2P                |  Reconstruct at quorum
-       |  --------------------------------->  |  Validate & execute locally
-       |  (on-grid + off-grid)                 |
-```
-
-- **No custody of funds** - Messages only
-- **No payment processing** - Instruction delivery infrastructure
-- **No financial intermediary** - Peer-to-peer messaging fabric
+- `RFQ`: maker proposes OTC terms (`base/quote`, size, expiry)
+- `Trade`: bilateral agreement (`buyer/seller`, wallets, fee bps)
+- `Escrow`: on-chain lifecycle tracked by externally submitted transaction hashes (`tx_hash`)
 
 ## Installation
+
 ```bash
 pip install -r requirements.txt
 ```
 
-## Main Repository Files
-- `oneseam_enterprise.py` - Core runtime (P2P, REST, storage, security, CLI)
-- `oneseam_config.yaml` - Node configuration
-- `requirements.txt` - Python dependencies
-- `README.md` - Product and operational documentation
-- `tests/test_security.py` - Security-focused tests
-- `verify_env.py` - Environment validation helper
-- `clean_storage.py` - Local cleanup helper
+## Main Files
+
+- `oneseam_enterprise.py` - runtime (P2P, OTC domain, REST, CLI, storage)
+- `oneseam_config.yaml` - node and OTC/EVM config
+- `requirements.txt` - dependencies
+- `tests/test_security.py` - auth and audit tests
 
 ## Configuration
 
-Edit `oneseam_config.yaml`:
-```yaml
-quorum_k: 2          # Minimum shards for reconstruction
-quorum_n: 3          # Total shards
-transport_mode: HYBRID   # ON_GRID | OFF_GRID | HYBRID
-region: "EU"         # Data sovereignty region
-```
+Edit `oneseam_config.yaml`.
 
-### Storage (DB)
+### Core
+
 ```yaml
+node_port: 5001
+broadcast_port: 5002
 db_backend: "sqlite"   # sqlite | postgres
-db_path: "oneseam.db"
-db_dsn: ""             # postgres DSN if backend=postgres
+quorum_k: 2
+quorum_n: 3
 ```
 
-### Bootstrap / NAT
+### OTC
+
 ```yaml
-seed_nodes: ["1.2.3.4:5001"]
-upnp_enabled: false
+otc_enabled: true
+wallet_binding_required: true
+allowed_base_assets: ["BTC", "ETH", "SOL"]
+allowed_quote_assets: ["USDT", "USDC", "USD"]
+otc_default_fee_bps: 20
+otc_max_trade_notional: 10000000
 ```
 
-### Local Test (Single Machine)
+### EVM Escrow (Non-Custodial)
+
 ```yaml
-local_test_port_scan_size: 20
-local_test_discovery_interval: 2.0
-local_test_registry_dir: ".oneseam_local"
-local_test_registry_ttl_seconds: 90
+evm_rpc_url: ""
+evm_chain_id: 11155111
+escrow_factory_address: ""
+escrow_confirmations_required: 1
+escrow_verify_on_submit: false
 ```
 
-### Security (REST API)
-```yaml
-tls_enabled: true
-tls_cert_path: "/path/to/cert.pem"
-tls_key_path: "/path/to/key.pem"
-mtls_ca_path: "/path/to/ca.pem"   # optional
+### Security
 
-jwt_issuer: "oneseam"
-jwt_audience: "oneseam-api"
-jwt_public_keys:
-  - "/path/to/jwt_public_key.pem"
-```
-
-### Security (P2P)
 ```yaml
-p2p_tls_enabled: true
-p2p_tls_cert_path: "/path/to/cert.pem"
-p2p_tls_key_path: "/path/to/key.pem"
-p2p_mtls_ca_path: "/path/to/ca.pem"
-p2p_mtls_required: true
-```
-
-### Shard Signing
-```yaml
+tls_enabled: false
+jwt_public_keys: []
+allow_legacy_api_keys: true
+p2p_tls_enabled: false
 shard_signature_required: true
-shard_signing_private_key: "shard_signing_priv.pem"
-shard_signing_public_key: "shard_signing_pub.pem"
-trusted_node_pubkeys: {}  # {NODE_ID: "-----BEGIN PUBLIC KEY-----..."}
 ```
 
-## Usage
+## Run
 
-### CLI Mode
+### CLI mode
+
 ```bash
 python oneseam_enterprise.py
 ```
 
-### REST API Mode
+### REST mode
+
 ```bash
 python oneseam_enterprise.py api
 ```
 
-### Local P2P Test (Same Computer)
+### Local test with two terminals (same machine)
+
 ```bash
 # Terminal 1
 python oneseam_enterprise.py --local-test
 
-# Terminal 2 (same command, different ephemeral node ID)
+# Terminal 2
 python oneseam_enterprise.py --local-test
 ```
 
-Notes:
-- In `--local-test`, each process gets a different ephemeral `node_id`.
-- If the default P2P port is busy, the node auto-selects the next free local port.
-- Nodes discover each other on `127.0.0.1` automatically in local test mode via a local registry.
+Each process gets an ephemeral node id in local-test mode.
 
-**Endpoints:**
-- `GET /health` - Health check
-- `GET /ready` - Readiness check
-- `GET /metrics` - Metrics snapshot (if enabled)
-- `POST /v1/seam/payment_obligation` - Create SEAM payment obligation
-- `POST /v1/instructions` - Submit instruction
-- `GET /v1/instructions/<id>` - Retrieve / reconstruct instruction
-- `POST /v1/instructions/<id>/release` - Generate Access Release Token (ART)
-- `GET /v1/billing` - Billing report
+## REST API (Public Surface)
 
-**Authentication:** `Authorization: Bearer <JWT>` (default). `X-API-Key` is deprecated.
+- `GET /health`
+- `GET /ready`
+- `GET /metrics`
+- `POST /v1/otc/wallet/bind`
+- `POST /v1/otc/rfqs`
+- `GET /v1/otc/rfqs/{rfq_id}`
+- `POST /v1/otc/rfqs/{rfq_id}/accept`
+- `POST /v1/otc/trades`
+- `GET /v1/otc/trades/{trade_id}`
+- `POST /v1/otc/trades/{trade_id}/escrow/create`
+- `POST /v1/otc/trades/{trade_id}/settle`
+- `POST /v1/otc/trades/{trade_id}/refund`
+- `GET /v1/otc/fees`
 
-## Business Model
+Auth: `Authorization: Bearer <JWT>`.
 
-Enterprise-first: software licensing, support, and per-instruction volume billing ($0.02 per reconstructed instruction) via cryptographic access release mechanism.
+Recommended scopes:
+- `otc:rfq:write`, `otc:rfq:read`
+- `otc:trade:write`, `otc:trade:read`
+- `otc:settle`
 
-## Dependencies
+For non-custodial escrow operations, submit externally signed tx hashes:
 
-- `cryptography` - AES-256-GCM payload encryption
-- `pycryptodome` - Shamir Secret Sharing (zero-knowledge sharding)
-- `aiohttp` - REST API
-- `pyyaml` - Configuration
-- `PyJWT` - JWT authentication
-- `pydantic` - Schema validation
-- `psycopg2-binary` - PostgreSQL backend (optional)
-- `miniupnpc` - NAT traversal (optional)
+```json
+{
+  "tx_hash": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "escrow_trade_ref": "optional_contract_trade_id"
+}
+```
 
-## License
+## Notes
 
-Proprietary - Oneseam Enterprise
+- Legacy financial-messaging and USD metering endpoints are removed from public API and CLI.
+- Existing sharding/quorum/P2P infrastructure remains active.
+- Non-custodial mode: the node does not sign transactions and does not custody private keys.
+- Escrow/settle/refund endpoints require externally signed `tx_hash`.

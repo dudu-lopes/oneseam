@@ -1,4 +1,4 @@
-# Oneseam Enterprise Configuration
+# Oneseam OTC Configuration
 # Version: 2.0
 
 # Node settings
@@ -21,7 +21,7 @@ quorum_n: 3
 # - HYBRID: Both
 transport_mode: HYBRID
 
-# Data sovereignty (GDPR, LGPD compliance)
+# Optional routing hints
 region: ""
 country_code: ""
 
@@ -78,6 +78,22 @@ trusted_node_pubkeys: {}  # {NODE_ID: "-----BEGIN PUBLIC KEY-----..."}
 # Key management
 key_store_path: "oneseam_keys.json"
 signing_key_id: "node_signing"
+
+# OTC domain (public API/CLI)
+otc_enabled: true
+wallet_binding_required: true
+allowed_base_assets: ["BTC", "ETH", "SOL"]
+allowed_quote_assets: ["USDT", "USDC", "USD"]
+otc_default_fee_bps: 20
+otc_max_trade_notional: 10000000
+
+# EVM escrow integration (non-custodial)
+# Node only verifies externally submitted tx hashes.
+evm_rpc_url: ""
+evm_chain_id: 11155111
+escrow_factory_address: ""
+escrow_confirmations_required: 1
+escrow_verify_on_submit: false
 
 # Observability
 log_file: ""         # empty = stdout

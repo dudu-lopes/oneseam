@@ -12,6 +12,7 @@ bank_beta/
 .oneseam_local/
 .tmp/
 .tmp_tests/
+.tmp_runtime/
 *.db
 *.db-shm
 *.db-wal
@@ -33,4 +34,5 @@ Thumbs.db
 
 # Local secrets / keys
 shard_signing_priv.pem
+shard_signing_pub.pem
 oneseam_keys.json
