@@ -35,6 +35,12 @@ blind_relay_flood: false  # Flood to all neighbors for max resilience
 seed_nodes: []  # ex: ["1.2.3.4:5001", "seed.example.com:5001"]
 upnp_enabled: false
 
+# Local test (single machine, multi-terminal)
+local_test_port_scan_size: 20
+local_test_discovery_interval: 2.0
+local_test_registry_dir: ".oneseam_local"
+local_test_registry_ttl_seconds: 90
+
 # Security (REST API)
 tls_enabled: false
 tls_cert_path: ""

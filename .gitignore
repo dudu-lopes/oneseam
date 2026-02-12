@@ -7,6 +7,17 @@ __pycache__/
 
 # Local data and storage
 oneseam_storage/
+bank_alpha/
+bank_beta/
+.oneseam_local/
+.tmp/
+.tmp_tests/
+*.db
+*.db-shm
+*.db-wal
+metering_events.jsonl
+node_id.txt
+oneseam_enterprise.check.pyc*
 
 # OS generated files
 .DS_Store
@@ -19,3 +30,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local secrets / keys
+shard_signing_priv.pem
+oneseam_keys.json

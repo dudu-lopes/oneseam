@@ -71,6 +71,15 @@ Origin Institution                    Destination Institution
 pip install -r requirements.txt
 ```
 
+## Main Repository Files
+- `oneseam_enterprise.py` - Core runtime (P2P, REST, storage, security, CLI)
+- `oneseam_config.yaml` - Node configuration
+- `requirements.txt` - Python dependencies
+- `README.md` - Product and operational documentation
+- `tests/test_security.py` - Security-focused tests
+- `verify_env.py` - Environment validation helper
+- `clean_storage.py` - Local cleanup helper
+
 ## Configuration
 
 Edit `oneseam_config.yaml`:
@@ -92,6 +101,14 @@ db_dsn: ""             # postgres DSN if backend=postgres
 ```yaml
 seed_nodes: ["1.2.3.4:5001"]
 upnp_enabled: false
+```
+
+### Local Test (Single Machine)
+```yaml
+local_test_port_scan_size: 20
+local_test_discovery_interval: 2.0
+local_test_registry_dir: ".oneseam_local"
+local_test_registry_ttl_seconds: 90
 ```
 
 ### Security (REST API)
@@ -135,6 +152,20 @@ python oneseam_enterprise.py
 ```bash
 python oneseam_enterprise.py api
 ```
+
+### Local P2P Test (Same Computer)
+```bash
+# Terminal 1
+python oneseam_enterprise.py --local-test
+
+# Terminal 2 (same command, different ephemeral node ID)
+python oneseam_enterprise.py --local-test
+```
+
+Notes:
+- In `--local-test`, each process gets a different ephemeral `node_id`.
+- If the default P2P port is busy, the node auto-selects the next free local port.
+- Nodes discover each other on `127.0.0.1` automatically in local test mode via a local registry.
 
 **Endpoints:**
 - `GET /health` - Health check

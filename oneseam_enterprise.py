@@ -717,6 +717,11 @@ TRUSTED_NODE_PUBKEYS = _config('trusted_node_pubkeys', {}) or {}
 BROADCAST_ADDR = _config('broadcast_addr', '<broadcast>')
 BUFFER_SIZE = 1024 * 1024  # 1MB
 NODE_ID_FILE = 'node_id.txt'
+LOCAL_TEST_MODE = ('--local-test' in sys.argv) or (os.environ.get('ONESEAM_LOCAL_TEST', '').strip().lower() in ('1', 'true', 'yes'))
+LOCAL_TEST_PORT_SCAN_SIZE = int(_config('local_test_port_scan_size', 20))
+LOCAL_TEST_DISCOVERY_INTERVAL = float(_config('local_test_discovery_interval', 2.0))
+LOCAL_TEST_REGISTRY_DIR = _config('local_test_registry_dir', '.oneseam_local')
+LOCAL_TEST_REGISTRY_TTL_SECONDS = int(_config('local_test_registry_ttl_seconds', 90))
 LOG_FILE = _config('log_file', '')
 LOG_JSON = _config('log_json', True)
 LOG_LEVEL = _config('log_level', 'INFO')
@@ -1555,6 +1560,10 @@ def get_billing_report(client_id: str, start_time: int, end_time: int) -> Dict:
 def get_node_id() -> str:
     """Get or create unique node ID"""
     global node_id
+    if LOCAL_TEST_MODE:
+        # Local test mode uses ephemeral node IDs to allow multiple terminals on one host.
+        node_id = str(uuid.uuid4())
+        return node_id
     if os.path.exists(NODE_ID_FILE):
         with open(NODE_ID_FILE, 'r') as f:
             node_id = f.read().strip()
@@ -2365,6 +2374,81 @@ def _parse_seed_nodes() -> List[Dict[str, Any]]:
             seeds.append({'ip': item.get('ip'), 'port': item.get('port', NODE_PORT)})
     return [s for s in seeds if s.get('ip')]
 
+def _local_test_registry_path() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isabs(LOCAL_TEST_REGISTRY_DIR):
+        return LOCAL_TEST_REGISTRY_DIR
+    return os.path.join(base_dir, LOCAL_TEST_REGISTRY_DIR)
+
+def _local_test_registry_file() -> str:
+    safe_node = (node_id or 'unknown').replace(':', '_').replace('/', '_').replace('\\', '_')
+    return os.path.join(_local_test_registry_path(), f'{safe_node}.json')
+
+def local_test_registry_touch():
+    if not LOCAL_TEST_MODE or not node_id:
+        return
+    try:
+        reg_dir = _local_test_registry_path()
+        os.makedirs(reg_dir, exist_ok=True)
+        record = {
+            'node_id': node_id,
+            'node_port': NODE_PORT,
+            'updated_at': int(time.time()),
+            'pid': os.getpid()
+        }
+        target = _local_test_registry_file()
+        tmp = f'{target}.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(record, f)
+        os.replace(tmp, target)
+    except Exception:
+        pass
+
+def local_test_registry_peers() -> List[Dict[str, Any]]:
+    peers: List[Dict[str, Any]] = []
+    if not LOCAL_TEST_MODE:
+        return peers
+    now_ts = int(time.time())
+    reg_dir = _local_test_registry_path()
+    if not os.path.isdir(reg_dir):
+        return peers
+    try:
+        for name in os.listdir(reg_dir):
+            if not name.endswith('.json'):
+                continue
+            full_path = os.path.join(reg_dir, name)
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    rec = json.load(f)
+            except Exception:
+                continue
+            remote_id = rec.get('node_id', '')
+            try:
+                remote_port = int(rec.get('node_port', 0))
+                updated_at = int(rec.get('updated_at', 0))
+            except Exception:
+                continue
+            if not remote_id or remote_id == node_id or remote_port <= 0:
+                continue
+            if now_ts - updated_at > LOCAL_TEST_REGISTRY_TTL_SECONDS:
+                try:
+                    os.remove(full_path)
+                except Exception:
+                    pass
+                continue
+            peers.append({'node_id': remote_id, 'ip': '127.0.0.1', 'port': remote_port})
+    except Exception:
+        return peers
+    return peers
+
+def local_test_registry_cleanup():
+    if not LOCAL_TEST_MODE or not node_id:
+        return
+    try:
+        os.remove(_local_test_registry_file())
+    except Exception:
+        pass
+
 async def bootstrap_seeds():
     while True:
         seeds = _parse_seed_nodes()
@@ -2389,6 +2473,37 @@ async def bootstrap_seeds():
             except Exception:
                 continue
         await asyncio.sleep(30)
+
+async def local_test_discovery_async():
+    """
+    Local discovery helper for same-host testing.
+    Uses a local node registry directory and exchanges handshakes.
+    """
+    if not LOCAL_TEST_MODE:
+        return
+    while True:
+        try:
+            local_test_registry_touch()
+            msg = {
+                'cmd': CMD_HANDSHAKE,
+                'node_id': node_id,
+                'node_port': NODE_PORT,
+                'capabilities': ['storage', 'reconstruction', 'routing', 'seam_v1'],
+                'version': '2.0',
+                'transport_mode': TRANSPORT_MODE,
+                'region': CONFIG.get('region', ''),
+                'country_code': CONFIG.get('country_code', ''),
+                'served_destinations': SERVED_DESTINATIONS,
+                'node_signing_pub': get_node_signing_public()
+            }
+            for peer in local_test_registry_peers():
+                try:
+                    await send_to_node_async(peer['ip'], msg, port=peer['port'])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(max(0.5, LOCAL_TEST_DISCOVERY_INTERVAL))
 
 def try_upnp():
     if not UPNP_ENABLED:
@@ -2425,6 +2540,7 @@ async def prune_neighbors_async():
 # ===== NETWORKING: TCP SERVER =====
 async def start_p2p_server():
     """Async TCP server to receive requests from other nodes"""
+    global NODE_PORT
     ensure_storage()
     ssl_ctx = None
     if P2P_TLS_ENABLED:
@@ -2437,8 +2553,28 @@ async def start_p2p_server():
         if P2P_MTLS_CA_PATH:
             ssl_ctx.load_verify_locations(P2P_MTLS_CA_PATH)
             ssl_ctx.verify_mode = ssl.CERT_REQUIRED
-    server = await asyncio.start_server(handle_client_async, host='', port=NODE_PORT, ssl=ssl_ctx)
+
+    server = None
+    if LOCAL_TEST_MODE:
+        # In local tests, auto-pick a free port if default is already in use.
+        scan = max(1, LOCAL_TEST_PORT_SCAN_SIZE)
+        for candidate_port in range(NODE_PORT, NODE_PORT + scan + 1):
+            try:
+                server = await asyncio.start_server(handle_client_async, host='', port=candidate_port, ssl=ssl_ctx)
+                if candidate_port != NODE_PORT:
+                    print(f'[LOCAL-TEST] P2P port {NODE_PORT} in use, switched to {candidate_port}')
+                    NODE_PORT = candidate_port
+                break
+            except OSError:
+                continue
+        if server is None:
+            raise RuntimeError('[P2P] Failed to bind any local-test port')
+    else:
+        server = await asyncio.start_server(handle_client_async, host='', port=NODE_PORT, ssl=ssl_ctx)
+
     log_event('INFO', 'p2p_listen', port=NODE_PORT, tls=P2P_TLS_ENABLED)
+    if LOCAL_TEST_MODE:
+        local_test_registry_touch()
     async with server:
         await server.serve_forever()
 
@@ -2581,20 +2717,22 @@ async def handle_client_async(reader: asyncio.StreamReader, writer: asyncio.Stre
         
         elif cmd == CMD_HANDSHAKE:
             try:
-                with neighbors_lock:
-                    neighbors[msg['node_id']] = {
-                        'ip': writer.get_extra_info('peername')[0] if writer.get_extra_info('peername') else '',
-                        'node_port': msg.get('node_port', NODE_PORT),
-                        'capabilities': msg.get('capabilities', []),
-                        'version': msg.get('version', '0.0'),
-                        'transport_mode': msg.get('transport_mode', 'ON_GRID'),
-                        'region': msg.get('region', ''),
-                        'country_code': msg.get('country_code', ''),
-                        'served_destinations': msg.get('served_destinations', []),
-                        'last_seen': time.strftime('%Y-%m-%d %H:%M:%S'),
-                        'last_seen_ts': time.time(),
-                        'signing_pub': msg.get('node_signing_pub', '')
-                    }
+                remote_node_id = msg.get('node_id', '')
+                if remote_node_id and remote_node_id != node_id:
+                    with neighbors_lock:
+                        neighbors[remote_node_id] = {
+                            'ip': writer.get_extra_info('peername')[0] if writer.get_extra_info('peername') else '',
+                            'node_port': msg.get('node_port', NODE_PORT),
+                            'capabilities': msg.get('capabilities', []),
+                            'version': msg.get('version', '0.0'),
+                            'transport_mode': msg.get('transport_mode', 'ON_GRID'),
+                            'region': msg.get('region', ''),
+                            'country_code': msg.get('country_code', ''),
+                            'served_destinations': msg.get('served_destinations', []),
+                            'last_seen': time.strftime('%Y-%m-%d %H:%M:%S'),
+                            'last_seen_ts': time.time(),
+                            'signing_pub': msg.get('node_signing_pub', '')
+                        }
                 writer.write(b'OK')
                 await writer.drain()
             except Exception:
@@ -2713,6 +2851,7 @@ def migrate_shards_on_shutdown():
 def handle_shutdown(signum, frame):
     """Graceful shutdown handler"""
     migrate_shards_on_shutdown()
+    local_test_registry_cleanup()
     try:
         STORAGE_DB.close()
     except Exception:
@@ -3069,6 +3208,7 @@ def cli_menu():
             view_billing()
         elif choice == '8':
             print('\n[SHUTDOWN] Stopping node...')
+            local_test_registry_cleanup()
             raise SystemExit(0)
         else:
             print('[!] Invalid option.')
@@ -3398,6 +3538,8 @@ if __name__ == '__main__':
         try_upnp()
 
         print(f'[INIT] Node ID: {node_id[:16]}...')
+        if LOCAL_TEST_MODE:
+            print('[INIT] Local test mode: ephemeral node ID enabled')
         print(f'[INIT] Storage: db_backend={DB_BACKEND}')
         print(f'[INIT] SEAM Protocol: v1.0')
         print(f'[INIT] Supported types: PAYMENT_OBLIGATION, INVOICE, LETTER_OF_CREDIT, PURCHASE_ORDER')
@@ -3409,11 +3551,14 @@ if __name__ == '__main__':
             asyncio.create_task(prune_neighbors_async()),
             asyncio.create_task(bootstrap_seeds())
         ]
+        if LOCAL_TEST_MODE:
+            tasks.append(asyncio.create_task(local_test_discovery_async()))
+            print('[INIT] Local test discovery: localhost probing enabled')
         if BLIND_RELAY_ENABLED:
             tasks.append(asyncio.create_task(relay_worker()))
             print('[INIT] Blind Relay (Repasse Cego) enabled')
 
-        if len(sys.argv) > 1 and sys.argv[1] == 'api':
+        if 'api' in sys.argv:
             print('[MODE] Starting in API mode (REST server)')
             await start_rest_api()
             await asyncio.Event().wait()
