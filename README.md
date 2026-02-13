@@ -1,37 +1,34 @@
 # Oneseam OTC
 
-P2P OTC trading infrastructure with zero-knowledge privacy.
+P2P OTC trading infrastructure with zero-knowledge privacy and strict non-custodial smart contract settlement flow.
 
-## Product Scope
+## Scope
 
-Oneseam OTC is focused on **RFQ/Trade lifecycle and non-custodial escrow orchestration**.
-The platform preserves the core decentralized transport:
+Oneseam keeps the decentralized transport core and applies it to OTC lifecycle:
 
-- UDP P2P discovery + seed bootstrap
-- Shamir Secret Sharing (k-of-n)
-- Byzantine quorum reconstruction
+- P2P discovery (`UDP` + seed bootstrap)
+- Shamir Secret Sharing and Byzantine quorum
 - Ed25519 shard signatures
-- SQLite/PostgreSQL storage
+- SQLite/PostgreSQL persistence
 - REST API + CLI
+- Non-custodial EVM escrow orchestration (Sepolia default)
 
-## Current Domain Model
+Server never stores private keys and never signs or broadcasts client transactions.
 
-- `RFQ`: maker proposes OTC terms (`base/quote`, size, expiry)
-- `Trade`: bilateral agreement (`buyer/seller`, wallets, fee bps)
-- `Escrow`: on-chain lifecycle tracked by externally submitted transaction hashes (`tx_hash`)
+## Main Files
+
+- `oneseam_enterprise.py`: runtime (P2P, OTC domain, REST, CLI, storage)
+- `oneseam_config.yaml`: node, OTC and EVM config
+- `contracts/OTCEscrow.sol`: escrow contract source
+- `contracts/abi/OTCEscrow.json`: contract ABI consumed by backend
+- `requirements.txt`: Python dependencies
+- `tests/test_security.py`: security and audit tests
 
 ## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
-
-## Main Files
-
-- `oneseam_enterprise.py` - runtime (P2P, OTC domain, REST, CLI, storage)
-- `oneseam_config.yaml` - node and OTC/EVM config
-- `requirements.txt` - dependencies
-- `tests/test_security.py` - auth and audit tests
 
 ## Configuration
 
@@ -43,6 +40,7 @@ Edit `oneseam_config.yaml`.
 node_port: 5001
 broadcast_port: 5002
 db_backend: "sqlite"   # sqlite | postgres
+db_path: "oneseam.db"
 quorum_k: 2
 quorum_n: 3
 ```
@@ -63,9 +61,13 @@ otc_max_trade_notional: 10000000
 ```yaml
 evm_rpc_url: ""
 evm_chain_id: 11155111
-escrow_factory_address: ""
+escrow_contract_address: ""
+escrow_contract_abi_path: "contracts/abi/OTCEscrow.json"
 escrow_confirmations_required: 1
-escrow_verify_on_submit: false
+escrow_verify_on_submit: true
+escrow_prepare_ttl_seconds: 600
+escrow_event_strict_validation: true
+escrow_reconcile_interval_seconds: 20
 ```
 
 ### Security
@@ -92,7 +94,7 @@ python oneseam_enterprise.py
 python oneseam_enterprise.py api
 ```
 
-### Local test with two terminals (same machine)
+### Local test on one machine
 
 ```bash
 # Terminal 1
@@ -102,19 +104,19 @@ python oneseam_enterprise.py --local-test
 python oneseam_enterprise.py --local-test
 ```
 
-Each process gets an ephemeral node id in local-test mode.
+Each process gets an ephemeral node ID in local-test mode.
 
 ## REST API (Public Surface)
 
-- `GET /health`
-- `GET /ready`
-- `GET /metrics`
 - `POST /v1/otc/wallet/bind`
 - `POST /v1/otc/rfqs`
 - `GET /v1/otc/rfqs/{rfq_id}`
 - `POST /v1/otc/rfqs/{rfq_id}/accept`
 - `POST /v1/otc/trades`
 - `GET /v1/otc/trades/{trade_id}`
+- `POST /v1/otc/trades/{trade_id}/escrow/prepare`
+- `POST /v1/otc/trades/{trade_id}/settle/prepare`
+- `POST /v1/otc/trades/{trade_id}/refund/prepare`
 - `POST /v1/otc/trades/{trade_id}/escrow/create`
 - `POST /v1/otc/trades/{trade_id}/settle`
 - `POST /v1/otc/trades/{trade_id}/refund`
@@ -122,23 +124,53 @@ Each process gets an ephemeral node id in local-test mode.
 
 Auth: `Authorization: Bearer <JWT>`.
 
-Recommended scopes:
-- `otc:rfq:write`, `otc:rfq:read`
-- `otc:trade:write`, `otc:trade:read`
-- `otc:settle`
+## Non-Custodial Flow
 
-For non-custodial escrow operations, submit externally signed tx hashes:
+1. Create/accept RFQ and create trade.
+2. Call a `*/prepare` endpoint to get unsigned transaction payload:
+
+```json
+{
+  "prepared_transaction": {
+    "intent_id": "intent_...",
+    "to": "0x...",
+    "data": "0x...",
+    "value": "0",
+    "chain_id": 11155111,
+    "gas_hint": { "limit": 350000 },
+    "action": "escrow_create",
+    "trade_id": "trade_...",
+    "expires_at": 1730000000000
+  }
+}
+```
+
+3. Sign and broadcast transaction using external wallet/infrastructure.
+4. Submit `tx_hash` to action endpoint (`escrow/create`, `settle`, `refund`).
+5. Backend verifies receipt, confirmations, contract address, expected event and trade linkage before state transition.
+
+Submit payload:
 
 ```json
 {
   "tx_hash": "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "escrow_trade_ref": "optional_contract_trade_id"
+  "intent_id": "intent_...",
+  "escrow_trade_ref": "optional"
 }
 ```
 
+## Verification Error Codes
+
+- `tx_not_found`
+- `tx_not_confirmed`
+- `tx_reverted`
+- `wrong_contract`
+- `wrong_event`
+- `trade_mismatch`
+- `tx_hash_reused`
+
 ## Notes
 
-- Legacy financial-messaging and USD metering endpoints are removed from public API and CLI.
-- Existing sharding/quorum/P2P infrastructure remains active.
-- Non-custodial mode: the node does not sign transactions and does not custody private keys.
-- Escrow/settle/refund endpoints require externally signed `tx_hash`.
+- Public surface is OTC-only.
+- Legacy financial messaging endpoints are not part of OTC API surface.
+- Billing is fee-per-trade (`bps`) instead of USD metering per instruction.

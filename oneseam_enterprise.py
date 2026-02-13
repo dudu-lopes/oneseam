@@ -1,6 +1,6 @@
-"""
-Oneseam Enterprise - P2P OTC Trading with Zero-Knowledge Privacy
-Version: 2.0.0
+﻿"""
+Oneseam Enterprise - P2P OTC Trading Infrastructure with Zero-Knowledge Privacy
+Version: 2.1.0
 
 Enterprise-grade P2P OTC infrastructure with privacy-preserving transport.
 - Byzantine fault-tolerant (configurable k-of-n quorum)
@@ -176,6 +176,11 @@ if PYDANTIC_AVAILABLE:
         model_config = ConfigDict(extra='forbid')
         tx_hash: str
         escrow_trade_ref: Optional[str] = None
+        intent_id: Optional[str] = None
+
+    class OTCPrepareRequest(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        timeout_seconds: Optional[int] = None
 
 def derive_key_from_password(password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
     """Derive AES-256 key from password using PBKDF2HMAC"""
@@ -244,6 +249,15 @@ if os.path.exists(CONFIG_PATH):
 def _config(key: str, default: Any) -> Any:
     return CONFIG.get(key, default)
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
 NODE_PORT = _config('node_port', 5001)
 BROADCAST_PORT = _config('broadcast_port', 5002)
 API_PORT = _config('api_port', 8000)
@@ -251,7 +265,7 @@ API_BIND = _config('api_bind', '127.0.0.1')
 DB_BACKEND = _config('db_backend', 'sqlite')
 DB_PATH = _config('db_path', 'oneseam.db')
 DB_DSN = _config('db_dsn', '')
-TLS_ENABLED = _config('tls_enabled', False)
+TLS_ENABLED = _as_bool(_config('tls_enabled', False))
 TLS_CERT_PATH = _config('tls_cert_path', '')
 TLS_KEY_PATH = _config('tls_key_path', '')
 MTLS_CA_PATH = _config('mtls_ca_path', '')
@@ -260,23 +274,23 @@ JWT_ISSUER = _config('jwt_issuer', '')
 JWT_AUDIENCE = _config('jwt_audience', '')
 JWT_PUBLIC_KEYS = _config('jwt_public_keys', []) or []
 JWT_ALGORITHMS = _config('jwt_algorithms', ['RS256', 'ES256']) or ['RS256', 'ES256']
-ALLOW_LEGACY_API_KEYS = _config('allow_legacy_api_keys', True)
+ALLOW_LEGACY_API_KEYS = _as_bool(_config('allow_legacy_api_keys', True))
 API_MAX_PAYLOAD_BYTES = _config('api_max_payload_bytes', 1024 * 1024)
 RATE_LIMIT_RPS = _config('rate_limit_rps', 5)
 RATE_LIMIT_BURST = _config('rate_limit_burst', 10)
 IDEMPOTENCY_TTL_SECONDS = _config('idempotency_ttl_seconds', 300)
 IDEMPOTENCY_MAX_ENTRIES = _config('idempotency_max_entries', 10000)
-P2P_TLS_ENABLED = _config('p2p_tls_enabled', False)
+P2P_TLS_ENABLED = _as_bool(_config('p2p_tls_enabled', False))
 P2P_TLS_CERT_PATH = _config('p2p_tls_cert_path', '')
 P2P_TLS_KEY_PATH = _config('p2p_tls_key_path', '')
 P2P_MTLS_CA_PATH = _config('p2p_mtls_ca_path', '')
 P2P_MTLS_ALLOWED_CNS = _config('p2p_mtls_allowed_cns', []) or []
-P2P_MTLS_REQUIRED = _config('p2p_mtls_required', True)
+P2P_MTLS_REQUIRED = _as_bool(_config('p2p_mtls_required', True))
 P2P_RETRIES = _config('p2p_retries', 3)
 P2P_BACKOFF_BASE = _config('p2p_backoff_base', 0.2)
 SEED_NODES = _config('seed_nodes', []) or []
-UPNP_ENABLED = _config('upnp_enabled', False)
-SHARD_SIGNATURE_REQUIRED = _config('shard_signature_required', True)
+UPNP_ENABLED = _as_bool(_config('upnp_enabled', False))
+SHARD_SIGNATURE_REQUIRED = _as_bool(_config('shard_signature_required', True))
 SHARD_SIGNING_PRIVATE_KEY = _config('shard_signing_private_key', 'shard_signing_priv.pem')
 SHARD_SIGNING_PUBLIC_KEY = _config('shard_signing_public_key', 'shard_signing_pub.pem')
 TRUSTED_NODE_PUBKEYS = _config('trusted_node_pubkeys', {}) or {}
@@ -289,28 +303,37 @@ LOCAL_TEST_DISCOVERY_INTERVAL = float(_config('local_test_discovery_interval', 2
 LOCAL_TEST_REGISTRY_DIR = _config('local_test_registry_dir', '.oneseam_local')
 LOCAL_TEST_REGISTRY_TTL_SECONDS = int(_config('local_test_registry_ttl_seconds', 90))
 LOG_FILE = _config('log_file', '')
-LOG_JSON = _config('log_json', True)
+LOG_JSON = _as_bool(_config('log_json', True))
 LOG_LEVEL = _config('log_level', 'INFO')
 NEIGHBOR_TTL_SECONDS = _config('neighbor_ttl_seconds', 60)
-METRICS_ENABLED = _config('metrics_enabled', True)
+METRICS_ENABLED = _as_bool(_config('metrics_enabled', True))
 DEFAULT_QUORUM_K = _config('quorum_k', 2)
 DEFAULT_QUORUM_N = _config('quorum_n', 3)
 TRANSPORT_MODE = _config('transport_mode', 'HYBRID')  # ON_GRID, OFF_GRID, HYBRID
-BLIND_RELAY_ENABLED = _config('blind_relay_enabled', True)
+BLIND_RELAY_ENABLED = _as_bool(_config('blind_relay_enabled', True))
 MAX_RELAY_HOPS = _config('max_relay_hops', 10)
 SERVED_DESTINATIONS = _config('served_destinations', []) or []
-BLIND_RELAY_FLOOD = _config('blind_relay_flood', False)
-OTC_ENABLED = _config('otc_enabled', True)
+BLIND_RELAY_FLOOD = _as_bool(_config('blind_relay_flood', False))
+OTC_ENABLED = _as_bool(_config('otc_enabled', True))
 EVM_RPC_URL = _config('evm_rpc_url', '')
 EVM_CHAIN_ID = int(_config('evm_chain_id', 11155111))
-ESCROW_FACTORY_ADDRESS = _config('escrow_factory_address', '')
+ESCROW_CONTRACT_ADDRESS = _config('escrow_contract_address', _config('escrow_factory_address', ''))
+ESCROW_CONTRACT_ABI_PATH = _config('escrow_contract_abi_path', 'contracts/abi/OTCEscrow.json')
+ESCROW_CONTRACT_NAME = _config('escrow_contract_name', 'OTCEscrow')
+ESCROW_CONTRACT_VERSION = _config('escrow_contract_version', '1.0.0')
 ESCROW_CONFIRMATIONS_REQUIRED = int(_config('escrow_confirmations_required', 1))
-ESCROW_VERIFY_ON_SUBMIT = bool(_config('escrow_verify_on_submit', False))
+ESCROW_VERIFY_ON_SUBMIT = _as_bool(_config('escrow_verify_on_submit', True))
+ESCROW_PREPARE_TTL_SECONDS = int(_config('escrow_prepare_ttl_seconds', 600))
+ESCROW_EVENT_STRICT_VALIDATION = _as_bool(_config('escrow_event_strict_validation', True))
+ESCROW_RECONCILE_INTERVAL_SECONDS = int(_config('escrow_reconcile_interval_seconds', 20))
+OTC_ASSETS = _config('otc_assets', {}) or {}
 OTC_DEFAULT_FEE_BPS = int(_config('otc_default_fee_bps', 20))
 OTC_MAX_TRADE_NOTIONAL = float(_config('otc_max_trade_notional', 10_000_000))
-WALLET_BINDING_REQUIRED = bool(_config('wallet_binding_required', True))
+WALLET_BINDING_REQUIRED = _as_bool(_config('wallet_binding_required', True))
 ALLOWED_BASE_ASSETS = set((_config('allowed_base_assets', ['BTC', 'ETH', 'USDT']) or []))
 ALLOWED_QUOTE_ASSETS = set((_config('allowed_quote_assets', ['USDT', 'USDC', 'USD']) or []))
+# Backward compatibility for legacy variable name used across older code paths.
+ESCROW_FACTORY_ADDRESS = ESCROW_CONTRACT_ADDRESS
 
 # Protocol commands
 CMD_HANDSHAKE = 'HANDSHAKE'
@@ -332,6 +355,34 @@ TRADE_STATUS_SETTLED = 'SETTLED'
 TRADE_STATUS_REFUNDED = 'REFUNDED'
 TRADE_STATUS_CANCELLED = 'CANCELLED'
 TRADE_STATUS_EXPIRED = 'EXPIRED'
+OTC_ACTION_ESCROW_CREATE = 'escrow_create'
+OTC_ACTION_SETTLE = 'settle'
+OTC_ACTION_REFUND = 'refund'
+OTC_ACTION_EVENT_MAP = {
+    OTC_ACTION_ESCROW_CREATE: 'TradeCreated',
+    OTC_ACTION_SETTLE: 'TradeSettled',
+    OTC_ACTION_REFUND: 'TradeRefunded'
+}
+OTC_ACTION_EVENT_TYPE_MAP = {
+    OTC_ACTION_ESCROW_CREATE: 'escrow_created',
+    OTC_ACTION_SETTLE: 'trade_settled',
+    OTC_ACTION_REFUND: 'trade_refunded'
+}
+OTC_ACTION_NEXT_STATE = {
+    OTC_ACTION_ESCROW_CREATE: TRADE_STATUS_ESCROW_CREATED,
+    OTC_ACTION_SETTLE: TRADE_STATUS_SETTLED,
+    OTC_ACTION_REFUND: TRADE_STATUS_REFUNDED
+}
+OTC_ALLOWED_STATE_TRANSITIONS = {
+    OTC_ACTION_ESCROW_CREATE: {TRADE_STATUS_CREATED},
+    OTC_ACTION_SETTLE: {TRADE_STATUS_ESCROW_CREATED, TRADE_STATUS_FUNDED},
+    OTC_ACTION_REFUND: {TRADE_STATUS_ESCROW_CREATED, TRADE_STATUS_FUNDED}
+}
+OTC_ACTION_INVALID_STATE_ERROR = {
+    OTC_ACTION_ESCROW_CREATE: 'trade_not_in_escrow_creatable_state',
+    OTC_ACTION_SETTLE: 'trade_not_settle_ready',
+    OTC_ACTION_REFUND: 'trade_not_refundable'
+}
 
 # Node state
 node_id = None
@@ -507,13 +558,36 @@ class StorageDB:
                     event_id TEXT PRIMARY KEY,
                     trade_id TEXT,
                     event_type TEXT,
+                    intent_id TEXT,
+                    contract_address TEXT,
+                    event_name TEXT,
                     tx_hash TEXT,
                     block_number INTEGER,
+                    confirmations INTEGER DEFAULT 0,
                     chain_id INTEGER,
+                    verified INTEGER DEFAULT 0,
                     payload_json TEXT,
                     created_at INTEGER
                 )
                 """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_trade ON escrow_events(trade_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_tx ON escrow_events(tx_hash)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS onchain_intents (
+                    intent_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    action TEXT,
+                    expected_event TEXT,
+                    prepared_payload_json TEXT,
+                    tx_hash TEXT,
+                    status TEXT,
+                    expires_at INTEGER,
+                    created_at INTEGER,
+                    updated_at INTEGER
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_onchain_intents_trade_action ON onchain_intents(trade_id, action)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_onchain_intents_status ON onchain_intents(status)")
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS trade_fee_events (
                     event_id TEXT PRIMARY KEY,
@@ -634,13 +708,36 @@ class StorageDB:
                     event_id TEXT PRIMARY KEY,
                     trade_id TEXT,
                     event_type TEXT,
+                    intent_id TEXT,
+                    contract_address TEXT,
+                    event_name TEXT,
                     tx_hash TEXT,
                     block_number BIGINT,
+                    confirmations BIGINT DEFAULT 0,
                     chain_id INTEGER,
+                    verified BOOLEAN DEFAULT FALSE,
                     payload_json TEXT,
                     created_at BIGINT
                 )
                 """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_trade ON escrow_events(trade_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_tx ON escrow_events(tx_hash)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS onchain_intents (
+                    intent_id TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    action TEXT,
+                    expected_event TEXT,
+                    prepared_payload_json TEXT,
+                    tx_hash TEXT,
+                    status TEXT,
+                    expires_at BIGINT,
+                    created_at BIGINT,
+                    updated_at BIGINT
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_onchain_intents_trade_action ON onchain_intents(trade_id, action)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_onchain_intents_status ON onchain_intents(status)")
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS trade_fee_events (
                     event_id TEXT PRIMARY KEY,
@@ -654,7 +751,38 @@ class StorageDB:
                     created_at BIGINT
                 )
                 """)
-    
+            if self.backend == 'sqlite':
+                self._migrate_sqlite_schema(cur)
+            else:
+                self._migrate_postgres_schema(cur)
+
+    def _column_exists_sqlite(self, cur, table: str, column: str) -> bool:
+        cur.execute(f"PRAGMA table_info({table})")
+        return any((row[1] == column) for row in cur.fetchall())
+
+    def _migrate_sqlite_schema(self, cur):
+        cols = [
+            ('intent_id', 'TEXT'),
+            ('contract_address', 'TEXT'),
+            ('event_name', 'TEXT'),
+            ('confirmations', 'INTEGER DEFAULT 0'),
+            ('verified', 'INTEGER DEFAULT 0')
+        ]
+        for col, typ in cols:
+            if not self._column_exists_sqlite(cur, 'escrow_events', col):
+                cur.execute(f"ALTER TABLE escrow_events ADD COLUMN {col} {typ}")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_trade ON escrow_events(trade_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_tx ON escrow_events(tx_hash)")
+
+    def _migrate_postgres_schema(self, cur):
+        cur.execute("ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS intent_id TEXT")
+        cur.execute("ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS contract_address TEXT")
+        cur.execute("ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS event_name TEXT")
+        cur.execute("ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS confirmations BIGINT DEFAULT 0")
+        cur.execute("ALTER TABLE escrow_events ADD COLUMN IF NOT EXISTS verified BOOLEAN DEFAULT FALSE")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_trade ON escrow_events(trade_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_escrow_events_tx ON escrow_events(tx_hash)")
+
     def _execute(self, query: str, params: Tuple = ()):
         with self.lock:
             cur = self.conn.cursor()
@@ -939,7 +1067,7 @@ class StorageDB:
         if not trade:
             return
         txs = trade.get('escrow_tx_hashes', [])
-        if add_tx_hash:
+        if add_tx_hash and add_tx_hash not in txs:
             txs.append(add_tx_hash)
         now_ms = int(time.time() * 1000)
         self._execute("""UPDATE trades SET status=?, escrow_trade_ref=?, escrow_tx_hashes_json=?, updated_at=?
@@ -985,17 +1113,160 @@ class StorageDB:
     def record_escrow_event(self, event: Dict[str, Any]):
         data = (
             event.get('event_id', str(uuid_lib.uuid4())), event['trade_id'], event['event_type'],
-            event.get('tx_hash', ''), event.get('block_number', 0), event.get('chain_id', EVM_CHAIN_ID),
+            event.get('intent_id', ''), event.get('contract_address', ''), event.get('event_name', ''),
+            event.get('tx_hash', ''), event.get('block_number', 0), event.get('confirmations', 0),
+            event.get('chain_id', EVM_CHAIN_ID), 1 if event.get('verified', False) else 0,
             json.dumps(event.get('payload', {})), int(time.time() * 1000)
         )
         self._execute("""INSERT INTO escrow_events
-                         (event_id, trade_id, event_type, tx_hash, block_number, chain_id, payload_json, created_at)
-                         VALUES (?,?,?,?,?,?,?,?)"""
+                         (event_id, trade_id, event_type, intent_id, contract_address, event_name,
+                          tx_hash, block_number, confirmations, chain_id, verified, payload_json, created_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""
                       if self.backend == 'sqlite'
                       else """INSERT INTO escrow_events
-                         (event_id, trade_id, event_type, tx_hash, block_number, chain_id, payload_json, created_at)
-                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                         (event_id, trade_id, event_type, intent_id, contract_address, event_name,
+                          tx_hash, block_number, confirmations, chain_id, verified, payload_json, created_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                       data)
+
+    def get_escrow_event_by_tx_hash(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("""SELECT event_id, trade_id, event_type, intent_id, contract_address, event_name,
+                               tx_hash, block_number, confirmations, chain_id, verified, payload_json, created_at
+                               FROM escrow_events WHERE tx_hash=? ORDER BY created_at DESC LIMIT 1"""
+                            if self.backend == 'sqlite'
+                            else """SELECT event_id, trade_id, event_type, intent_id, contract_address, event_name,
+                               tx_hash, block_number, confirmations, chain_id, verified, payload_json, created_at
+                               FROM escrow_events WHERE tx_hash=%s ORDER BY created_at DESC LIMIT 1""",
+                            (tx_hash,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'event_id': row[0],
+            'trade_id': row[1],
+            'event_type': row[2],
+            'intent_id': row[3],
+            'contract_address': row[4],
+            'event_name': row[5],
+            'tx_hash': row[6],
+            'block_number': row[7],
+            'confirmations': row[8],
+            'chain_id': row[9],
+            'verified': bool(row[10]),
+            'payload': json.loads(row[11]) if row[11] else {},
+            'created_at': row[12]
+        }
+
+    def create_onchain_intent(self, intent: Dict[str, Any]):
+        now_ms = int(time.time() * 1000)
+        expires_at = int(intent.get('expires_at', now_ms + ESCROW_PREPARE_TTL_SECONDS * 1000))
+        data = (
+            intent['intent_id'],
+            intent['trade_id'],
+            intent['action'],
+            intent.get('expected_event', ''),
+            json.dumps(intent.get('prepared_payload', {})),
+            intent.get('tx_hash', ''),
+            intent.get('status', 'prepared'),
+            expires_at,
+            now_ms,
+            now_ms
+        )
+        self._execute("""INSERT INTO onchain_intents
+                         (intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?)"""
+                      if self.backend == 'sqlite'
+                      else """INSERT INTO onchain_intents
+                         (intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                      data)
+
+    def get_onchain_intent(self, intent_id: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("""SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                               FROM onchain_intents WHERE intent_id=?"""
+                            if self.backend == 'sqlite'
+                            else """SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                               FROM onchain_intents WHERE intent_id=%s""",
+                            (intent_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'intent_id': row[0],
+            'trade_id': row[1],
+            'action': row[2],
+            'expected_event': row[3],
+            'prepared_payload': json.loads(row[4]) if row[4] else {},
+            'tx_hash': row[5] or '',
+            'status': row[6],
+            'expires_at': row[7],
+            'created_at': row[8],
+            'updated_at': row[9]
+        }
+
+    def get_latest_onchain_intent(self, trade_id: str, action: str) -> Optional[Dict[str, Any]]:
+        cur = self._execute("""SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                               FROM onchain_intents WHERE trade_id=? AND action=? ORDER BY created_at DESC LIMIT 1"""
+                            if self.backend == 'sqlite'
+                            else """SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                               FROM onchain_intents WHERE trade_id=%s AND action=%s ORDER BY created_at DESC LIMIT 1""",
+                            (trade_id, action))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            'intent_id': row[0],
+            'trade_id': row[1],
+            'action': row[2],
+            'expected_event': row[3],
+            'prepared_payload': json.loads(row[4]) if row[4] else {},
+            'tx_hash': row[5] or '',
+            'status': row[6],
+            'expires_at': row[7],
+            'created_at': row[8],
+            'updated_at': row[9]
+        }
+
+    def list_onchain_intents(self, statuses: Optional[List[str]] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        if statuses:
+            placeholders = ','.join(['?'] * len(statuses)) if self.backend == 'sqlite' else ','.join(['%s'] * len(statuses))
+            query = f"""SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                        FROM onchain_intents WHERE status IN ({placeholders}) ORDER BY created_at DESC LIMIT {'?' if self.backend == 'sqlite' else '%s'}"""
+            params = tuple(statuses) + (limit,)
+            cur = self._execute(query, params)
+        else:
+            cur = self._execute("""SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                                   FROM onchain_intents ORDER BY created_at DESC LIMIT ?"""
+                                if self.backend == 'sqlite'
+                                else """SELECT intent_id, trade_id, action, expected_event, prepared_payload_json, tx_hash, status, expires_at, created_at, updated_at
+                                   FROM onchain_intents ORDER BY created_at DESC LIMIT %s""",
+                                (limit,))
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                'intent_id': row[0],
+                'trade_id': row[1],
+                'action': row[2],
+                'expected_event': row[3],
+                'prepared_payload': json.loads(row[4]) if row[4] else {},
+                'tx_hash': row[5] or '',
+                'status': row[6],
+                'expires_at': row[7],
+                'created_at': row[8],
+                'updated_at': row[9]
+            })
+        return out
+
+    def update_onchain_intent_status(self, intent_id: str, status: str, tx_hash: Optional[str] = None):
+        now_ms = int(time.time() * 1000)
+        current = self.get_onchain_intent(intent_id)
+        if not current:
+            return
+        new_tx_hash = tx_hash or current.get('tx_hash', '')
+        self._execute("""UPDATE onchain_intents SET status=?, tx_hash=?, updated_at=? WHERE intent_id=?"""
+                      if self.backend == 'sqlite'
+                      else """UPDATE onchain_intents SET status=%s, tx_hash=%s, updated_at=%s WHERE intent_id=%s""",
+                      (status, new_tx_hash, now_ms, intent_id))
 
     def record_trade_fee_event(self, event: Dict[str, Any]):
         data = (
@@ -1621,6 +1892,9 @@ def otc_create_trade_direct(client: Dict[str, Any], data: Dict[str, Any], reques
 class OTCEscrow:
     def __init__(self):
         self.w3 = None
+        self.contract = None
+        self.contract_abi = None
+        self.contract_address = ''
 
     def _ensure_ready(self):
         if not WEB3_AVAILABLE:
@@ -1633,6 +1907,31 @@ class OTCEscrow:
         if not self.w3.is_connected():
             raise RuntimeError("evm_rpc_unreachable")
 
+    def _ensure_contract(self, require_abi: bool = True):
+        self._ensure_ready()
+        if not ESCROW_CONTRACT_ADDRESS:
+            raise RuntimeError("escrow_contract_not_configured")
+        if not Web3.is_address(ESCROW_CONTRACT_ADDRESS):
+            raise RuntimeError("escrow_contract_invalid_address")
+        if not self.contract_address:
+            self.contract_address = Web3.to_checksum_address(ESCROW_CONTRACT_ADDRESS)
+
+        if not require_abi and self.contract is not None:
+            return
+        if self.contract_abi is None:
+            if not ESCROW_CONTRACT_ABI_PATH:
+                raise RuntimeError("escrow_abi_not_configured")
+            if not os.path.exists(ESCROW_CONTRACT_ABI_PATH):
+                raise RuntimeError("escrow_abi_not_found")
+            with open(ESCROW_CONTRACT_ABI_PATH, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            abi = raw.get('abi') if isinstance(raw, dict) else raw
+            if not isinstance(abi, list):
+                raise RuntimeError("escrow_abi_invalid")
+            self.contract_abi = abi
+        if self.contract is None:
+            self.contract = self.w3.eth.contract(address=self.contract_address, abi=self.contract_abi)
+
     @staticmethod
     def _normalize_tx_hash(tx_hash: str) -> str:
         value = (tx_hash or '').strip().lower()
@@ -1640,18 +1939,136 @@ class OTCEscrow:
             raise ValueError("invalid_tx_hash")
         return value
 
-    def observe_external_tx(self, tx_hash: str) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_ref(value: Any) -> str:
+        if value is None:
+            return ''
+        if isinstance(value, (bytes, bytearray)):
+            return '0x' + bytes(value).hex()
+        return str(value).strip().lower()
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, (bytes, bytearray)):
+            return '0x' + bytes(value).hex()
+        if isinstance(value, list):
+            return [OTCEscrow._json_safe(v) for v in value]
+        if isinstance(value, tuple):
+            return [OTCEscrow._json_safe(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): OTCEscrow._json_safe(v) for k, v in value.items()}
+        try:
+            json.dumps(value)
+            return value
+        except Exception:
+            return str(value)
+
+    def _to_checksum_wallet(self, wallet_address: str, field: str) -> str:
+        wallet = (wallet_address or '').strip()
+        if not wallet:
+            raise ValueError(f"{field}_required")
+        if not Web3.is_address(wallet):
+            raise ValueError(f"{field}_invalid")
+        return Web3.to_checksum_address(wallet)
+
+    def _asset_decimals(self, asset_symbol: str) -> int:
+        symbol = _normalize_asset(asset_symbol)
+        cfg = OTC_ASSETS.get(symbol) or OTC_ASSETS.get(symbol.lower()) or {}
+        if isinstance(cfg, dict):
+            try:
+                return max(0, min(30, int(cfg.get('decimals', 8))))
+            except Exception:
+                return 8
+        return 8
+
+    def _encode_amount(self, amount: float, asset_symbol: str) -> int:
+        decimals = self._asset_decimals(asset_symbol)
+        scaled = int(round(float(amount) * (10 ** decimals)))
+        if scaled <= 0:
+            raise ValueError("invalid_amount")
+        return scaled
+
+    def _build_action_call(self, trade: Dict[str, Any], action: str, timeout_seconds: Optional[int] = None):
+        if action == OTC_ACTION_ESCROW_CREATE:
+            timeout = int(timeout_seconds) if timeout_seconds is not None else ESCROW_PREPARE_TTL_SECONDS
+            timeout = max(60, min(timeout, 7 * 24 * 3600))
+            timeout_at = int(time.time()) + timeout
+            args = [
+                trade['trade_id'],
+                self._to_checksum_wallet(trade.get('buyer_wallet', ''), 'buyer_wallet'),
+                self._to_checksum_wallet(trade.get('seller_wallet', ''), 'seller_wallet'),
+                trade.get('base_asset', ''),
+                trade.get('quote_asset', ''),
+                self._encode_amount(float(trade.get('base_amount', 0)), trade.get('base_asset', '')),
+                self._encode_amount(float(trade.get('quote_amount', 0)), trade.get('quote_asset', '')),
+                timeout_at
+            ]
+            return 'createTrade', args, {'limit': 350000}
+        if action == OTC_ACTION_SETTLE:
+            return 'settleTrade', [trade['trade_id']], {'limit': 220000}
+        if action == OTC_ACTION_REFUND:
+            return 'refundTrade', [trade['trade_id']], {'limit': 220000}
+        raise ValueError("invalid_trade_action")
+
+    def prepare_action_payload(self, trade: Dict[str, Any], action: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+        self._ensure_contract(require_abi=True)
+        fn_name, args, gas_hint = self._build_action_call(trade, action, timeout_seconds)
+        try:
+            data = self.contract.encodeABI(fn_name=fn_name, args=args)
+        except Exception:
+            fn = getattr(self.contract.functions, fn_name)(*args)
+            data = fn._encode_transaction_data()
+        now_ms = int(time.time() * 1000)
+        ttl = int(timeout_seconds) if timeout_seconds is not None else ESCROW_PREPARE_TTL_SECONDS
+        ttl = max(60, min(ttl, 7 * 24 * 3600))
+        return {
+            'to': self.contract_address,
+            'data': data,
+            'value': '0',
+            'chain_id': EVM_CHAIN_ID,
+            'gas_hint': gas_hint,
+            'action': action,
+            'trade_id': trade['trade_id'],
+            'contract_name': ESCROW_CONTRACT_NAME,
+            'contract_version': ESCROW_CONTRACT_VERSION,
+            'contract_address': self.contract_address,
+            'expires_at': now_ms + (ttl * 1000)
+        }
+
+    def _extract_expected_event(self, receipt: Any, expected_event: str) -> Dict[str, Any]:
+        self._ensure_contract(require_abi=True)
+        event_cls = getattr(self.contract.events, expected_event, None)
+        if event_cls is None:
+            raise ValueError("wrong_event")
+        events = event_cls().process_receipt(receipt)
+        if not events:
+            raise ValueError("wrong_event")
+        event = events[0]
+        raw_args = dict(event.get('args', {}) or {})
+        args = {k: self._json_safe(v) for k, v in raw_args.items()}
+        return {'event_name': event.get('event', expected_event), 'args': args}
+
+    def verify_submitted_action(self, tx_hash: str, trade: Dict[str, Any], action: str,
+                                escrow_trade_ref: Optional[str] = None) -> Dict[str, Any]:
+        expected_event = OTC_ACTION_EVENT_MAP.get(action)
+        if not expected_event:
+            raise ValueError("invalid_trade_action")
+
         normalized = self._normalize_tx_hash(tx_hash)
         result = {
             'tx_hash': normalized,
             'verified': False,
             'block_number': 0,
             'confirmations': 0,
-            'chain_id': EVM_CHAIN_ID
+            'chain_id': EVM_CHAIN_ID,
+            'contract_address': ESCROW_CONTRACT_ADDRESS,
+            'event_name': '',
+            'event_args': {}
         }
         if not ESCROW_VERIFY_ON_SUBMIT:
             return result
-        self._ensure_ready()
+
+        self._ensure_contract(require_abi=ESCROW_EVENT_STRICT_VALIDATION)
         try:
             receipt = self.w3.eth.get_transaction_receipt(normalized)
         except Exception:
@@ -1663,104 +2080,219 @@ class OTCEscrow:
         block_number = int(receipt.blockNumber or 0)
         latest = int(self.w3.eth.block_number)
         confirmations = max(0, latest - block_number + 1) if block_number else 0
-        required = max(1, ESCROW_CONFIRMATIONS_REQUIRED)
-        if confirmations < required:
+        if confirmations < max(1, ESCROW_CONFIRMATIONS_REQUIRED):
             raise ValueError("tx_not_confirmed")
+
+        tx = self.w3.eth.get_transaction(normalized)
+        tx_to = tx.get('to') if isinstance(tx, dict) else getattr(tx, 'to', None)
+        if not tx_to:
+            raise ValueError("wrong_contract")
+        if Web3.to_checksum_address(tx_to) != self.contract_address:
+            raise ValueError("wrong_contract")
+
+        event_name = expected_event
+        event_args = {}
+        resolved_trade_ref = ''
+        if ESCROW_EVENT_STRICT_VALIDATION:
+            event_data = self._extract_expected_event(receipt, expected_event)
+            event_name = event_data.get('event_name', expected_event)
+            event_args = event_data.get('args', {})
+            event_trade_id = str(event_args.get('tradeId') or event_args.get('trade_id') or '').strip()
+            if not event_trade_id or event_trade_id != trade.get('trade_id'):
+                raise ValueError("trade_mismatch")
+            observed_ref = self._normalize_ref(
+                event_args.get('escrowTradeRef') or event_args.get('escrow_trade_ref') or event_args.get('tradeRef') or ''
+            )
+            expected_ref = self._normalize_ref(escrow_trade_ref or '')
+            if expected_ref and observed_ref and expected_ref != observed_ref:
+                raise ValueError("trade_mismatch")
+            if expected_ref and not observed_ref:
+                raise ValueError("trade_mismatch")
+            resolved_trade_ref = observed_ref
+
         result.update({
             'verified': True,
             'block_number': block_number,
-            'confirmations': confirmations
+            'confirmations': confirmations,
+            'contract_address': self.contract_address,
+            'event_name': event_name,
+            'event_args': event_args,
+            'escrow_trade_ref': resolved_trade_ref
         })
         return result
 
-    def get_tx_receipt(self, tx_hash: str) -> Dict[str, Any]:
-        normalized = self._normalize_tx_hash(tx_hash)
-        self._ensure_ready()
-        receipt = self.w3.eth.get_transaction_receipt(normalized)
-        if not receipt:
-            raise ValueError("tx_not_found")
-        return {
-            'tx_hash': normalized,
-            'status': int(receipt.status),
-            'block_number': int(receipt.blockNumber or 0)
-        }
-
 OTC_ESCROW = OTCEscrow()
+def _new_intent_id() -> str:
+    return f"intent_{int(time.time())}_{secrets.token_hex(4)}"
 
-def otc_create_escrow(client: Dict[str, Any], trade_id: str, tx_hash: str,
-                      escrow_trade_ref: Optional[str] = None, request_id: str = '') -> Dict[str, Any]:
+def _validate_trade_action(trade: Dict[str, Any], action: str):
+    allowed = OTC_ALLOWED_STATE_TRANSITIONS.get(action)
+    if not allowed:
+        raise ValueError("invalid_trade_action")
+    if trade.get('status') not in allowed:
+        raise ValueError(OTC_ACTION_INVALID_STATE_ERROR.get(action, 'invalid_trade_state'))
+
+def _resolve_onchain_intent(trade_id: str, action: str, intent_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if intent_id:
+        intent = STORAGE_DB.get_onchain_intent(intent_id)
+        if not intent:
+            raise ValueError("intent_not_found")
+        if intent.get('trade_id') != trade_id:
+            raise ValueError("intent_trade_mismatch")
+        if intent.get('action') != action:
+            raise ValueError("intent_action_mismatch")
+        return intent
+    latest = STORAGE_DB.get_latest_onchain_intent(trade_id, action)
+    if latest and latest.get('status') == 'prepared':
+        return latest
+    return None
+
+def _ensure_intent_not_expired(intent: Optional[Dict[str, Any]]):
+    if not intent:
+        return
+    now_ms = int(time.time() * 1000)
+    if int(intent.get('expires_at', 0) or 0) and now_ms > int(intent.get('expires_at', 0)):
+        STORAGE_DB.update_onchain_intent_status(intent['intent_id'], 'expired', tx_hash=intent.get('tx_hash'))
+        raise ValueError("intent_expired")
+
+def _ensure_tx_not_replayed(trade_id: str, action: str, tx_hash: str):
+    existing = STORAGE_DB.get_escrow_event_by_tx_hash(tx_hash)
+    if not existing:
+        return
+    expected_type = OTC_ACTION_EVENT_TYPE_MAP.get(action, '')
+    if existing.get('trade_id') != trade_id or existing.get('event_type') != expected_type:
+        raise ValueError("tx_hash_reused")
+    raise ValueError("tx_hash_reused")
+
+def otc_prepare_trade_action(client: Dict[str, Any], trade_id: str, action: str,
+                             timeout_seconds: Optional[int] = None, request_id: str = '') -> Dict[str, Any]:
     trade = STORAGE_DB.get_trade(trade_id)
     if not trade:
         raise ValueError("trade_not_found")
-    if trade.get('status') not in (TRADE_STATUS_CREATED,):
-        raise ValueError("trade_not_in_escrow_creatable_state")
     if not _trade_actor_allowed(client, trade):
         raise PermissionError("actor_not_allowed_for_trade")
-    onchain = OTC_ESCROW.observe_external_tx(tx_hash)
+    _validate_trade_action(trade, action)
+    prepared = OTC_ESCROW.prepare_action_payload(trade, action, timeout_seconds=timeout_seconds)
+    intent_id = _new_intent_id()
+    prepared['intent_id'] = intent_id
+    STORAGE_DB.create_onchain_intent({
+        'intent_id': intent_id,
+        'trade_id': trade_id,
+        'action': action,
+        'expected_event': OTC_ACTION_EVENT_MAP[action],
+        'prepared_payload': prepared,
+        'status': 'prepared',
+        'expires_at': int(prepared.get('expires_at', int(time.time() * 1000)))
+    })
+    append_audit_event(
+        f"{action}_prepared",
+        client['client_id'],
+        trade_id,
+        details={'intent_id': intent_id, 'action': action},
+        request_id=request_id
+    )
+    return prepared
+
+def otc_submit_trade_action(client: Dict[str, Any], trade_id: str, action: str, tx_hash: str,
+                            escrow_trade_ref: Optional[str] = None, intent_id: Optional[str] = None,
+                            request_id: str = '') -> Dict[str, Any]:
+    trade = STORAGE_DB.get_trade(trade_id)
+    if not trade:
+        raise ValueError("trade_not_found")
+    if not _trade_actor_allowed(client, trade):
+        raise PermissionError("actor_not_allowed_for_trade")
+
+    normalized_hash = OTCEscrow._normalize_tx_hash(tx_hash)
+    _ensure_tx_not_replayed(trade_id, action, normalized_hash)
+    _validate_trade_action(trade, action)
+
+    intent = _resolve_onchain_intent(trade_id, action, intent_id)
+    _ensure_intent_not_expired(intent)
+    if intent:
+        STORAGE_DB.update_onchain_intent_status(intent['intent_id'], 'submitted', tx_hash=normalized_hash)
+
+    onchain = OTC_ESCROW.verify_submitted_action(normalized_hash, trade, action, escrow_trade_ref=escrow_trade_ref)
+    next_state = OTC_ACTION_NEXT_STATE[action]
+    event_type = OTC_ACTION_EVENT_TYPE_MAP[action]
+    resolved_trade_ref = trade.get('escrow_trade_ref', '')
+    if action == OTC_ACTION_ESCROW_CREATE:
+        resolved_trade_ref = onchain.get('escrow_trade_ref') or escrow_trade_ref or resolved_trade_ref or normalized_hash
+
     STORAGE_DB.update_trade_state(
         trade_id,
-        TRADE_STATUS_ESCROW_CREATED,
-        escrow_trade_ref=(escrow_trade_ref or trade.get('escrow_trade_ref') or onchain.get('tx_hash', '')),
-        add_tx_hash=onchain.get('tx_hash')
+        next_state,
+        escrow_trade_ref=resolved_trade_ref if action == OTC_ACTION_ESCROW_CREATE else None,
+        add_tx_hash=onchain.get('tx_hash', normalized_hash)
     )
     STORAGE_DB.record_escrow_event({
         'trade_id': trade_id,
-        'event_type': 'escrow_created',
-        'tx_hash': onchain.get('tx_hash', ''),
+        'event_type': event_type,
+        'intent_id': intent['intent_id'] if intent else '',
+        'contract_address': onchain.get('contract_address', ESCROW_CONTRACT_ADDRESS),
+        'event_name': onchain.get('event_name', OTC_ACTION_EVENT_MAP[action]),
+        'tx_hash': onchain.get('tx_hash', normalized_hash),
         'block_number': onchain.get('block_number', 0),
+        'confirmations': onchain.get('confirmations', 0),
         'chain_id': EVM_CHAIN_ID,
-        'payload': {'request_id': request_id, 'external_submission': True, 'verified': onchain.get('verified', False)}
+        'verified': bool(onchain.get('verified', False)),
+        'payload': {
+            'request_id': request_id,
+            'external_submission': True,
+            'verified': onchain.get('verified', False),
+            'action': action,
+            'event_args': onchain.get('event_args', {})
+        }
     })
-    append_audit_event('escrow_created', client['client_id'], trade_id, request_id=request_id)
+    if intent:
+        STORAGE_DB.update_onchain_intent_status(intent['intent_id'], 'confirmed', tx_hash=onchain.get('tx_hash', normalized_hash))
+    append_audit_event(
+        event_type,
+        client['client_id'],
+        trade_id,
+        details={
+            'intent_id': intent['intent_id'] if intent else '',
+            'tx_hash': onchain.get('tx_hash', normalized_hash),
+            'event_name': onchain.get('event_name', '')
+        },
+        request_id=request_id
+    )
     trade = STORAGE_DB.get_trade(trade_id) or trade
-    trade['escrow_tx'] = onchain
+    trade[f'{action}_tx'] = onchain
     return trade
 
-def otc_settle_trade(client: Dict[str, Any], trade_id: str, tx_hash: str, request_id: str = '') -> Dict[str, Any]:
-    trade = STORAGE_DB.get_trade(trade_id)
-    if not trade:
-        raise ValueError("trade_not_found")
-    if trade.get('status') not in (TRADE_STATUS_ESCROW_CREATED, TRADE_STATUS_FUNDED):
-        raise ValueError("trade_not_settle_ready")
-    if not _trade_actor_allowed(client, trade):
-        raise PermissionError("actor_not_allowed_for_trade")
-    onchain = OTC_ESCROW.observe_external_tx(tx_hash)
-    STORAGE_DB.update_trade_state(trade_id, TRADE_STATUS_SETTLED, add_tx_hash=onchain.get('tx_hash'))
-    STORAGE_DB.record_escrow_event({
-        'trade_id': trade_id,
-        'event_type': 'trade_settled',
-        'tx_hash': onchain.get('tx_hash', ''),
-        'block_number': onchain.get('block_number', 0),
-        'chain_id': EVM_CHAIN_ID,
-        'payload': {'request_id': request_id, 'external_submission': True, 'verified': onchain.get('verified', False)}
-    })
-    append_audit_event('trade_settled', client['client_id'], trade_id, request_id=request_id)
-    trade = STORAGE_DB.get_trade(trade_id) or trade
-    trade['settlement_tx'] = onchain
-    return trade
+def otc_prepare_escrow(client: Dict[str, Any], trade_id: str, timeout_seconds: Optional[int] = None,
+                       request_id: str = '') -> Dict[str, Any]:
+    return otc_prepare_trade_action(client, trade_id, OTC_ACTION_ESCROW_CREATE, timeout_seconds=timeout_seconds, request_id=request_id)
 
-def otc_refund_trade(client: Dict[str, Any], trade_id: str, tx_hash: str, request_id: str = '') -> Dict[str, Any]:
-    trade = STORAGE_DB.get_trade(trade_id)
-    if not trade:
-        raise ValueError("trade_not_found")
-    if trade.get('status') in (TRADE_STATUS_SETTLED, TRADE_STATUS_REFUNDED, TRADE_STATUS_CANCELLED):
-        raise ValueError("trade_not_refundable")
-    if not _trade_actor_allowed(client, trade):
-        raise PermissionError("actor_not_allowed_for_trade")
-    onchain = OTC_ESCROW.observe_external_tx(tx_hash)
-    STORAGE_DB.update_trade_state(trade_id, TRADE_STATUS_REFUNDED, add_tx_hash=onchain.get('tx_hash'))
-    STORAGE_DB.record_escrow_event({
-        'trade_id': trade_id,
-        'event_type': 'trade_refunded',
-        'tx_hash': onchain.get('tx_hash', ''),
-        'block_number': onchain.get('block_number', 0),
-        'chain_id': EVM_CHAIN_ID,
-        'payload': {'request_id': request_id, 'external_submission': True, 'verified': onchain.get('verified', False)}
-    })
-    append_audit_event('trade_refunded', client['client_id'], trade_id, request_id=request_id)
-    trade = STORAGE_DB.get_trade(trade_id) or trade
-    trade['refund_tx'] = onchain
-    return trade
+def otc_prepare_settle(client: Dict[str, Any], trade_id: str, timeout_seconds: Optional[int] = None,
+                       request_id: str = '') -> Dict[str, Any]:
+    return otc_prepare_trade_action(client, trade_id, OTC_ACTION_SETTLE, timeout_seconds=timeout_seconds, request_id=request_id)
+
+def otc_prepare_refund(client: Dict[str, Any], trade_id: str, timeout_seconds: Optional[int] = None,
+                       request_id: str = '') -> Dict[str, Any]:
+    return otc_prepare_trade_action(client, trade_id, OTC_ACTION_REFUND, timeout_seconds=timeout_seconds, request_id=request_id)
+
+def otc_create_escrow(client: Dict[str, Any], trade_id: str, tx_hash: str,
+                      escrow_trade_ref: Optional[str] = None, intent_id: Optional[str] = None,
+                      request_id: str = '') -> Dict[str, Any]:
+    return otc_submit_trade_action(
+        client, trade_id, OTC_ACTION_ESCROW_CREATE, tx_hash=tx_hash,
+        escrow_trade_ref=escrow_trade_ref, intent_id=intent_id, request_id=request_id
+    )
+
+def otc_settle_trade(client: Dict[str, Any], trade_id: str, tx_hash: str,
+                     intent_id: Optional[str] = None, request_id: str = '') -> Dict[str, Any]:
+    return otc_submit_trade_action(
+        client, trade_id, OTC_ACTION_SETTLE, tx_hash=tx_hash,
+        intent_id=intent_id, request_id=request_id
+    )
+
+def otc_refund_trade(client: Dict[str, Any], trade_id: str, tx_hash: str,
+                     intent_id: Optional[str] = None, request_id: str = '') -> Dict[str, Any]:
+    return otc_submit_trade_action(
+        client, trade_id, OTC_ACTION_REFUND, tx_hash=tx_hash,
+        intent_id=intent_id, request_id=request_id
+    )
 
 # ===== LOGGING =====
 _LEVELS = {'DEBUG': 10, 'INFO': 20, 'WARN': 30, 'ERROR': 40}
@@ -2837,6 +3369,103 @@ async def prune_neighbors_async():
         except Exception:
             await asyncio.sleep(NEIGHBOR_TTL_SECONDS)
 
+def _apply_verified_action_from_intent(intent: Dict[str, Any], trade: Dict[str, Any], onchain: Dict[str, Any]):
+    action = intent.get('action', '')
+    next_state = OTC_ACTION_NEXT_STATE.get(action)
+    event_type = OTC_ACTION_EVENT_TYPE_MAP.get(action, '')
+    if not next_state or not event_type:
+        raise ValueError("invalid_trade_action")
+    trade_id = intent.get('trade_id', '')
+    tx_hash = onchain.get('tx_hash', '')
+    if not tx_hash:
+        raise ValueError("tx_not_found")
+
+    existing = STORAGE_DB.get_escrow_event_by_tx_hash(tx_hash)
+    if existing and existing.get('trade_id') != trade_id:
+        raise ValueError("tx_hash_reused")
+    if existing and existing.get('trade_id') == trade_id:
+        STORAGE_DB.update_onchain_intent_status(intent['intent_id'], 'confirmed', tx_hash=tx_hash)
+        return
+
+    escrow_ref = trade.get('escrow_trade_ref', '')
+    if action == OTC_ACTION_ESCROW_CREATE:
+        escrow_ref = onchain.get('escrow_trade_ref') or escrow_ref or tx_hash
+
+    STORAGE_DB.update_trade_state(
+        trade_id,
+        next_state,
+        escrow_trade_ref=escrow_ref if action == OTC_ACTION_ESCROW_CREATE else None,
+        add_tx_hash=tx_hash
+    )
+    STORAGE_DB.record_escrow_event({
+        'trade_id': trade_id,
+        'event_type': event_type,
+        'intent_id': intent.get('intent_id', ''),
+        'contract_address': onchain.get('contract_address', ESCROW_CONTRACT_ADDRESS),
+        'event_name': onchain.get('event_name', OTC_ACTION_EVENT_MAP.get(action, '')),
+        'tx_hash': tx_hash,
+        'block_number': onchain.get('block_number', 0),
+        'confirmations': onchain.get('confirmations', 0),
+        'chain_id': EVM_CHAIN_ID,
+        'verified': bool(onchain.get('verified', False)),
+        'payload': {
+            'reconciled': True,
+            'action': action,
+            'event_args': onchain.get('event_args', {})
+        }
+    })
+    STORAGE_DB.update_onchain_intent_status(intent['intent_id'], 'confirmed', tx_hash=tx_hash)
+    append_audit_event(
+        'onchain_reconciled',
+        'system',
+        trade_id,
+        details={'intent_id': intent.get('intent_id', ''), 'tx_hash': tx_hash, 'action': action}
+    )
+
+async def onchain_reconciler_async():
+    while True:
+        try:
+            intents = STORAGE_DB.list_onchain_intents(statuses=['prepared', 'submitted'], limit=200)
+            now_ms = int(time.time() * 1000)
+            for intent in intents:
+                intent_id = intent.get('intent_id', '')
+                status = intent.get('status', '')
+                expires_at = int(intent.get('expires_at', 0) or 0)
+                if expires_at and now_ms > expires_at and status == 'prepared':
+                    STORAGE_DB.update_onchain_intent_status(intent_id, 'expired', tx_hash=intent.get('tx_hash'))
+                    continue
+                if status != 'submitted':
+                    continue
+                tx_hash = (intent.get('tx_hash') or '').strip().lower()
+                if not tx_hash:
+                    continue
+                trade = STORAGE_DB.get_trade(intent.get('trade_id', ''))
+                if not trade:
+                    STORAGE_DB.update_onchain_intent_status(intent_id, 'failed', tx_hash=tx_hash)
+                    continue
+                try:
+                    onchain = OTC_ESCROW.verify_submitted_action(
+                        tx_hash=tx_hash,
+                        trade=trade,
+                        action=intent.get('action', ''),
+                        escrow_trade_ref=trade.get('escrow_trade_ref')
+                    )
+                    _apply_verified_action_from_intent(intent, trade, onchain)
+                except Exception as e:
+                    code = str(e)
+                    if code in ('tx_not_found', 'tx_not_confirmed'):
+                        continue
+                    STORAGE_DB.update_onchain_intent_status(intent_id, 'failed', tx_hash=tx_hash)
+                    append_audit_event(
+                        'onchain_reconcile_failed',
+                        'system',
+                        trade.get('trade_id', ''),
+                        details={'intent_id': intent_id, 'error': code, 'tx_hash': tx_hash}
+                    )
+        except Exception as e:
+            log_event('WARN', 'onchain_reconcile_error', error=str(e))
+        await asyncio.sleep(max(5, ESCROW_RECONCILE_INTERVAL_SECONDS))
+
 # ===== NETWORKING: TCP SERVER =====
 async def start_p2p_server():
     """Async TCP server to receive requests from other nodes"""
@@ -3449,7 +4078,7 @@ async def start_rest_api():
         return web.json_response({
             'status': 'healthy',
             'service': 'Oneseam OTC Infrastructure',
-            'version': '2.0.0',
+            'version': '2.1.0',
             'domain': 'otc_p2p_trading',
             'non_custodial': True,
             'node_id': node_id,
@@ -3465,6 +4094,16 @@ async def start_rest_api():
         if not JWT_PUBLIC_KEY_CACHE and not ALLOW_LEGACY_API_KEYS:
             ok = False
             reasons.append('jwt_keys_missing')
+        if OTC_ENABLED and ESCROW_VERIFY_ON_SUBMIT:
+            if not EVM_RPC_URL:
+                ok = False
+                reasons.append('evm_rpc_url_missing')
+            if not ESCROW_CONTRACT_ADDRESS:
+                ok = False
+                reasons.append('escrow_contract_address_missing')
+            if ESCROW_EVENT_STRICT_VALIDATION and not os.path.exists(ESCROW_CONTRACT_ABI_PATH):
+                ok = False
+                reasons.append('escrow_contract_abi_missing')
         status = 'ready' if ok else 'not_ready'
         return web.json_response({'status': status, 'reasons': reasons, 'request_id': request['request_id']}, status=200 if ok else 503)
 
@@ -3477,11 +4116,30 @@ async def start_rest_api():
         msg = str(err)
         if isinstance(err, PermissionError):
             return json_error(request, 403, 'forbidden', msg or 'Forbidden')
+        error_status_map = {
+            'rfq_not_found': 404,
+            'trade_not_found': 404,
+            'intent_not_found': 404,
+            'intent_trade_mismatch': 409,
+            'intent_action_mismatch': 409,
+            'intent_expired': 409,
+            'tx_not_found': 404,
+            'tx_not_confirmed': 409,
+            'tx_reverted': 422,
+            'wrong_contract': 409,
+            'wrong_event': 409,
+            'trade_mismatch': 409,
+            'tx_hash_reused': 409,
+            'trade_not_in_escrow_creatable_state': 409,
+            'trade_not_settle_ready': 409,
+            'trade_not_refundable': 409
+        }
+        if isinstance(err, RuntimeError):
+            code = msg if msg else 'service_unavailable'
+            return json_error(request, 503, code, code)
         if isinstance(err, ValueError):
             code = msg if msg else 'invalid_request'
-            if code in ('rfq_not_found', 'trade_not_found'):
-                return json_error(request, 404, code, code)
-            return json_error(request, 400, code, code)
+            return json_error(request, error_status_map.get(code, 400), code, code)
         return json_error(request, 503, 'service_unavailable', msg or 'Service unavailable')
 
     async def wallet_bind_api(request):
@@ -3592,6 +4250,96 @@ async def start_rest_api():
             return json_error(request, 404, 'trade_not_found', 'trade_not_found')
         return web.json_response({'trade': trade, 'request_id': request['request_id']})
 
+    async def otc_prepare_escrow_api(request):
+        await ensure_auth(request, required_scopes=['otc:trade:write'], required_roles=['issuer', 'receiver', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        try:
+            data = await request.json() if (request.content_length or 0) > 0 else {}
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCPrepareRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            prepared = otc_prepare_escrow(
+                request['client'],
+                trade_id,
+                timeout_seconds=data.get('timeout_seconds'),
+                request_id=request['request_id']
+            )
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'prepared_transaction': prepared, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 200)
+        return web.json_response(payload)
+
+    async def otc_prepare_settle_api(request):
+        await ensure_auth(request, required_scopes=['otc:settle'], required_roles=['issuer', 'receiver', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        try:
+            data = await request.json() if (request.content_length or 0) > 0 else {}
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCPrepareRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            prepared = otc_prepare_settle(
+                request['client'],
+                trade_id,
+                timeout_seconds=data.get('timeout_seconds'),
+                request_id=request['request_id']
+            )
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'prepared_transaction': prepared, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 200)
+        return web.json_response(payload)
+
+    async def otc_prepare_refund_api(request):
+        await ensure_auth(request, required_scopes=['otc:settle'], required_roles=['issuer', 'receiver', 'admin'])
+        trade_id = request.match_info.get('trade_id')
+        try:
+            data = await request.json() if (request.content_length or 0) > 0 else {}
+        except Exception:
+            return json_error(request, 400, 'invalid_payload', 'Invalid payload')
+        if PYDANTIC_AVAILABLE:
+            try:
+                data = OTCPrepareRequest.model_validate(data).model_dump()
+            except ValidationError as e:
+                return json_error(request, 400, 'invalid_payload', str(e))
+        cached = idempotency_get(request['client']['client_id'], request.headers.get('Idempotency-Key', ''))
+        if cached:
+            return web.json_response(cached['payload'], status=cached['status'])
+        try:
+            prepared = otc_prepare_refund(
+                request['client'],
+                trade_id,
+                timeout_seconds=data.get('timeout_seconds'),
+                request_id=request['request_id']
+            )
+        except Exception as e:
+            return _map_otc_error(request, e)
+        payload = {'prepared_transaction': prepared, 'request_id': request['request_id']}
+        idem_key = request.headers.get('Idempotency-Key', '').strip()
+        if idem_key:
+            idempotency_put(request['client']['client_id'], idem_key, payload, 200)
+        return web.json_response(payload)
+
     async def otc_create_escrow_api(request):
         await ensure_auth(request, required_scopes=['otc:trade:write'], required_roles=['issuer', 'receiver', 'admin'])
         trade_id = request.match_info.get('trade_id')
@@ -3615,6 +4363,7 @@ async def start_rest_api():
                 trade_id,
                 data.get('tx_hash', ''),
                 escrow_trade_ref=data.get('escrow_trade_ref'),
+                intent_id=data.get('intent_id'),
                 request_id=request['request_id']
             )
         except Exception as e:
@@ -3643,7 +4392,13 @@ async def start_rest_api():
         if cached:
             return web.json_response(cached['payload'], status=cached['status'])
         try:
-            trade = otc_settle_trade(request['client'], trade_id, data.get('tx_hash', ''), request_id=request['request_id'])
+            trade = otc_settle_trade(
+                request['client'],
+                trade_id,
+                data.get('tx_hash', ''),
+                intent_id=data.get('intent_id'),
+                request_id=request['request_id']
+            )
         except Exception as e:
             return _map_otc_error(request, e)
         payload = {'trade': trade, 'request_id': request['request_id']}
@@ -3670,7 +4425,13 @@ async def start_rest_api():
         if cached:
             return web.json_response(cached['payload'], status=cached['status'])
         try:
-            trade = otc_refund_trade(request['client'], trade_id, data.get('tx_hash', ''), request_id=request['request_id'])
+            trade = otc_refund_trade(
+                request['client'],
+                trade_id,
+                data.get('tx_hash', ''),
+                intent_id=data.get('intent_id'),
+                request_id=request['request_id']
+            )
         except Exception as e:
             return _map_otc_error(request, e)
         payload = {'trade': trade, 'request_id': request['request_id']}
@@ -3701,6 +4462,9 @@ async def start_rest_api():
         web.post('/v1/otc/rfqs/{rfq_id}/accept', otc_accept_rfq_api),
         web.post('/v1/otc/trades', otc_create_trade_api),
         web.get('/v1/otc/trades/{trade_id}', otc_get_trade_api),
+        web.post('/v1/otc/trades/{trade_id}/escrow/prepare', otc_prepare_escrow_api),
+        web.post('/v1/otc/trades/{trade_id}/settle/prepare', otc_prepare_settle_api),
+        web.post('/v1/otc/trades/{trade_id}/refund/prepare', otc_prepare_refund_api),
         web.post('/v1/otc/trades/{trade_id}/escrow/create', otc_create_escrow_api),
         web.post('/v1/otc/trades/{trade_id}/settle', otc_settle_trade_api),
         web.post('/v1/otc/trades/{trade_id}/refund', otc_refund_trade_api),
@@ -3724,7 +4488,7 @@ async def start_rest_api():
 if __name__ == '__main__':
     print("""
 ===============================================
-  ONESEAM OTC v2.0
+  ONESEAM OTC v2.1
   P2P OTC Trading with Zero-Knowledge Privacy
   Non-Custodial RFQ + Trade + Escrow
 ===============================================
@@ -3747,14 +4511,15 @@ if __name__ == '__main__':
             print('[INIT] Local test mode: ephemeral node ID enabled')
         print(f'[INIT] Storage: db_backend={DB_BACKEND}')
         print(f'[INIT] OTC mode: enabled')
-        print(f'[INIT] Supported flow: RFQ -> Trade -> Escrow(tx_hash) -> Settle/Refund(tx_hash)')
+        print(f'[INIT] Supported flow: RFQ -> Trade -> Prepare -> External sign/broadcast -> Submit(tx_hash)')
 
         tasks = [
             asyncio.create_task(broadcast_presence_async()),
             asyncio.create_task(listen_broadcast_async()),
             asyncio.create_task(start_p2p_server()),
             asyncio.create_task(prune_neighbors_async()),
-            asyncio.create_task(bootstrap_seeds())
+            asyncio.create_task(bootstrap_seeds()),
+            asyncio.create_task(onchain_reconciler_async())
         ]
         if LOCAL_TEST_MODE:
             tasks.append(asyncio.create_task(local_test_discovery_async()))
