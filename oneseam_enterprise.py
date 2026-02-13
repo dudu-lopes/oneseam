@@ -1,5 +1,5 @@
 """
-Oneseam Enterprise - P2P OTC Trading with Zero-Knowledge Privacy
+Oneseam Enterprise - P2P OTC Trading Infrastructure with Zero-Knowledge Privacy
 Version: 2.0.0
 
 Enterprise-grade P2P OTC infrastructure with privacy-preserving transport.
