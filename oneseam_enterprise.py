@@ -1,6 +1,12 @@
+<<<<<<< HEAD
 ﻿"""
 Oneseam Enterprise - P2P OTC Trading Infrastructure with Zero-Knowledge Privacy
 Version: 2.1.0
+=======
+"""
+Oneseam Enterprise - P2P OTC Trading Infrastructure with Zero-Knowledge Privacy
+Version: 2.0.0
+>>>>>>> b0ec2b90a2d37561ba2dd861dc02674bd665c5b9
 
 Enterprise-grade P2P OTC infrastructure with privacy-preserving transport.
 - Byzantine fault-tolerant (configurable k-of-n quorum)
