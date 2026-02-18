@@ -36,6 +36,11 @@ API:
 python oneseam.py api
 ```
 
+Admin/Tecnico (oculto por padrao):
+```bash
+python oneseam.py --admin-ui
+```
+
 
 ## UX simples de wallet (CLI)
 Opcionalmente, para auto-assinar no CLI sem copiar mensagem manualmente:
@@ -45,6 +50,15 @@ export ONESEAM_WALLET_PRIVATE_KEY=0x...
 ```
 
 Se a wallet da acao bater com a chave do ambiente, a assinatura e aplicada automaticamente.
+
+## Trader Flow (CLI condensado)
+Menu principal do operador:
+- `1. Node Status`
+- `2. Commit Trade Intent (for matching)`
+- `3. Accept Trade (from match)`
+- `4. Exit`
+
+Funcoes tecnicas ficam fora do fluxo principal (modo admin).
 
 ## API v2 (DarkPool)
 - `POST /v2/intents/prepare-signature`

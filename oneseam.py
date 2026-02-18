@@ -358,6 +358,15 @@ BROADCAST_ADDR = _config('broadcast_addr', '<broadcast>')
 BUFFER_SIZE = 1024 * 1024  # 1MB
 NODE_ID_FILE = 'node_id.txt'
 LOCAL_TEST_MODE = ('--local-test' in sys.argv) or (os.environ.get('ONESEAM_LOCAL_TEST', '').strip().lower() in ('1', 'true', 'yes'))
+CLI_ADMIN_UI_MODE = ('--admin-ui' in sys.argv) or (os.environ.get('ONESEAM_ADMIN_UI', '').strip().lower() in ('1', 'true', 'yes'))
+CLI_MODE_OVERRIDE = (os.environ.get('ONESEAM_CLI_MODE', '').strip().lower() or '')
+if '--mode' in sys.argv:
+    try:
+        mode_index = sys.argv.index('--mode')
+        if mode_index + 1 < len(sys.argv):
+            CLI_MODE_OVERRIDE = str(sys.argv[mode_index + 1]).strip().lower()
+    except Exception:
+        pass
 LOCAL_TEST_PORT_SCAN_SIZE = int(_config('local_test_port_scan_size', 20))
 LOCAL_TEST_DISCOVERY_INTERVAL = float(_config('local_test_discovery_interval', 2.0))
 LOCAL_TEST_REGISTRY_DIR = _config('local_test_registry_dir', '.oneseam_local')
@@ -5812,6 +5821,551 @@ def audit_darkpool():
     if count == 0:
         print('No darkpool events found.')
 
+def _action_def(code: str, label: str, priority: int, context: Optional[Dict[str, Any]] = None,
+                risky: bool = False, auto: bool = True) -> Dict[str, Any]:
+    return {
+        'code': code,
+        'label': label,
+        'priority': int(priority),
+        'context': context or {},
+        'risky': bool(risky),
+        'auto': bool(auto),
+    }
+
+def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
+                         match: Optional[Dict[str, Any]] = None,
+                         session: Optional[Dict[str, Any]] = None,
+                         swap: Optional[Dict[str, Any]] = None,
+                         fee_invoice: Optional[Dict[str, Any]] = None,
+                         client_id: str = '') -> List[Dict[str, Any]]:
+    actions: List[Dict[str, Any]] = []
+    actor = (client_id or '').strip()
+
+    if intent:
+        status = str(intent.get('status', ''))
+        if status == INTENT_STATUS_OPEN:
+            actions.append(_action_def(
+                'VIEW_INTENT_STATUS',
+                'Monitorar intent aberta',
+                90,
+                {'intent_id': intent.get('intent_id', '')},
+                risky=False,
+                auto=False
+            ))
+        wallet_att = (intent.get('metadata') or {}).get('wallet_attestation', {})
+        if wallet_att and not wallet_att.get('verified'):
+            actions.append(_action_def(
+                'ASSINAR_INTENT',
+                'Assinar intent pendente',
+                1,
+                {'intent_id': intent.get('intent_id', '')},
+                risky=False,
+                auto=False
+            ))
+
+    if match and not session:
+        actions.append(_action_def(
+            'OPEN_SESSION',
+            'Abrir sessao segura',
+            20,
+            {'match_id': match.get('match_id', '')},
+            risky=False,
+            auto=True
+        ))
+
+    if session and not swap:
+        actions.append(_action_def(
+            'START_SWAP',
+            'Iniciar coordenacao HTLC',
+            25,
+            {'match_id': session.get('match_id', '')},
+            risky=False,
+            auto=True
+        ))
+
+    if swap:
+        swap_id = swap.get('swap_id', '')
+        state = str(swap.get('state', ''))
+        metadata = swap.get('metadata') or {}
+        peer_a = str(metadata.get('peer_a', '')).strip()
+        peer_b = str(metadata.get('peer_b', '')).strip()
+
+        def allowed(target_peer: str) -> bool:
+            return not actor or not target_peer or actor == target_peer
+
+        if state in (SWAP_STATE_INIT, SWAP_STATE_WAIT_LOCK_A):
+            if allowed(peer_a):
+                actions.append(_action_def('ENVIAR_LOCK_A', 'Enviar prova lock_a', 10, {'swap_id': swap_id, 'proof_type': 'lock_a'}))
+        if state == SWAP_STATE_WAIT_LOCK_B:
+            if allowed(peer_b):
+                actions.append(_action_def('ENVIAR_LOCK_B', 'Enviar prova lock_b', 11, {'swap_id': swap_id, 'proof_type': 'lock_b'}))
+            if allowed(peer_a):
+                actions.append(_action_def('REFUND_A', 'Executar refund_a', 80, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
+            if allowed(peer_b):
+                actions.append(_action_def('REFUND_B', 'Executar refund_b', 81, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
+        if state == SWAP_STATE_READY_CLAIM:
+            if allowed(peer_a):
+                actions.append(_action_def('ENVIAR_CLAIM_A', 'Enviar prova claim_a', 12, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
+            if allowed(peer_b):
+                actions.append(_action_def('ENVIAR_CLAIM_B', 'Enviar prova claim_b', 13, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
+            if allowed(peer_a):
+                actions.append(_action_def('REFUND_A', 'Executar refund_a', 82, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
+            if allowed(peer_b):
+                actions.append(_action_def('REFUND_B', 'Executar refund_b', 83, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
+        if state == SWAP_STATE_CLAIMED_A and allowed(peer_b):
+            actions.append(_action_def('ENVIAR_CLAIM_B', 'Enviar prova claim_b', 14, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
+        if state == SWAP_STATE_CLAIMED_B and allowed(peer_a):
+            actions.append(_action_def('ENVIAR_CLAIM_A', 'Enviar prova claim_a', 14, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
+        if state == SWAP_STATE_COMPLETED:
+            if not fee_invoice:
+                actions.append(_action_def('ISSUE_FEE', 'Emitir fee invoice', 30, {'swap_id': swap_id}, risky=False, auto=True))
+            elif str(fee_invoice.get('payment_status', 'pending')).lower() != 'paid':
+                actions.append(_action_def('CONFIRMAR_FEE', 'Confirmar pagamento de fee', 40, {'swap_id': swap_id}, risky=True, auto=False))
+
+    actions.sort(key=lambda x: x['priority'])
+    return actions
+
+def render_trade_summary(intent: Optional[Dict[str, Any]] = None,
+                         match: Optional[Dict[str, Any]] = None,
+                         swap: Optional[Dict[str, Any]] = None,
+                         fee_invoice: Optional[Dict[str, Any]] = None) -> str:
+    parts: List[str] = []
+    if intent:
+        parts.append(
+            f"intent={intent.get('intent_id','')} {intent.get('sell_asset','')}->{intent.get('buy_asset','')} "
+            f"amount={intent.get('amount','')} status={intent.get('status','')}"
+        )
+    if match:
+        parts.append(
+            f"match={match.get('match_id','')} overlap={match.get('overlap_min','')}-{match.get('overlap_max','')} "
+            f"status={match.get('status','')}"
+        )
+    if swap:
+        parts.append(f"swap={swap.get('swap_id','')} state={swap.get('state','')}")
+    if fee_invoice:
+        parts.append(
+            f"fee={fee_invoice.get('fee_amount','')} {fee_invoice.get('fee_asset','')} "
+            f"status={fee_invoice.get('payment_status','pending')}"
+        )
+    return " | ".join(parts) if parts else "no trade context"
+
+def _list_swaps_for_client(client_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+    if not client_id:
+        return []
+    if STORAGE_DB.backend == 'sqlite':
+        query = """
+            SELECT s.swap_id
+            FROM swap_coordination s
+            JOIN matches m ON m.match_id = s.match_id
+            JOIN trade_intents a ON a.intent_id = m.intent_sell_id
+            JOIN trade_intents b ON b.intent_id = m.intent_buy_id
+            WHERE a.maker_client_id=? OR b.maker_client_id=?
+            ORDER BY s.updated_at DESC
+            LIMIT ?
+        """
+    else:
+        query = """
+            SELECT s.swap_id
+            FROM swap_coordination s
+            JOIN matches m ON m.match_id = s.match_id
+            JOIN trade_intents a ON a.intent_id = m.intent_sell_id
+            JOIN trade_intents b ON b.intent_id = m.intent_buy_id
+            WHERE a.maker_client_id=%s OR b.maker_client_id=%s
+            ORDER BY s.updated_at DESC
+            LIMIT %s
+        """
+    cur = STORAGE_DB._execute(query, (client_id, client_id, limit))
+    rows = cur.fetchall() if cur else []
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        swap = _refresh_swap_timeout_state(row[0]) or STORAGE_DB.get_swap(row[0])
+        if swap:
+            out.append(swap)
+    return out
+
+def _submit_htlc_proof_interactive(client_id: str, swap_id: str, proof_type: str, source: str) -> Optional[Dict[str, Any]]:
+    print(f"\n[ACTION] {proof_type} | swap={swap_id}")
+    tx_hash = input('Tx hash: ').strip()
+    confirmations = int(input(f'Confirmations [{HTLC_MIN_CONFIRMATIONS}]: ').strip() or str(HTLC_MIN_CONFIRMATIONS))
+    secret = None
+    if proof_type.startswith('claim') or proof_type.startswith('refund'):
+        secret = input('Secret (optional): ').strip() or None
+    signer_wallet = input('Signer wallet (optional): ').strip()
+    wallet_nonce = input('Wallet nonce (optional): ').strip()
+    client_obj = _cli_otc_client(client_id)
+    payload = {
+        'proof_type': proof_type,
+        'tx_hash': tx_hash,
+        'confirmations': confirmations,
+        'secret': secret,
+        'signer_wallet': signer_wallet or None,
+        'wallet_nonce': wallet_nonce,
+        'metadata': {'cli_source': source}
+    }
+    if PROOF_WALLET_ATTESTATION_REQUIRED:
+        swap_obj = get_swap_status(client_obj, swap_id)
+        expected_wallet = _normalize_wallet(signer_wallet or _expected_wallet_for_proof(swap_obj, proof_type))
+        prepared = prepare_htlc_proof_signature(client_obj, swap_obj, payload, expected_wallet)
+        auto_signature = ''
+        try:
+            auto_signature = _sign_message_with_env_wallet(prepared['message'], prepared.get('wallet', ''))
+        except Exception as e:
+            print(f"[WARN] Auto-sign unavailable: {e}")
+        if auto_signature:
+            payload['wallet_signature'] = auto_signature
+            print('[SIGN] wallet_signature applied from ONESEAM_WALLET_PRIVATE_KEY')
+        else:
+            print('[SIGN] Sign this HTLC proof message with your wallet:')
+            print(prepared['message'])
+            payload['wallet_signature'] = input('wallet_signature (0x...): ').strip()
+    append_audit_event('cli_action', client_id, swap_id, details={'source': source, 'action': proof_type})
+    return submit_htlc_proof(client_obj, swap_id, payload)
+
+def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) -> bool:
+    code = str(action.get('code', '')).strip()
+    ctx = action.get('context') or {}
+    client_obj = _cli_otc_client(client_id)
+    try:
+        if code == 'OPEN_SESSION':
+            match_id = ctx.get('match_id', '')
+            append_audit_event('cli_action', client_id, match_id, details={'source': source, 'action': code})
+            open_secure_session(client_obj, match_id)
+            print(f"[OK] Session opened for match {match_id}")
+            return True
+        if code == 'START_SWAP':
+            match_id = ctx.get('match_id', '')
+            append_audit_event('cli_action', client_id, match_id, details={'source': source, 'action': code})
+            swap = start_htlc_coordination(client_obj, match_id)
+            print(f"[OK] Swap started: {swap.get('swap_id','')} state={swap.get('state','')}")
+            return True
+        if code.startswith('ENVIAR_') or code.startswith('REFUND_'):
+            swap_id = ctx.get('swap_id', '')
+            proof_type = ctx.get('proof_type', '')
+            if action.get('risky') and input(f"Confirm risky action {proof_type} on swap {swap_id}? (y/n): ").strip().lower() != 'y':
+                return False
+            result = _submit_htlc_proof_interactive(client_id, swap_id, proof_type, source=source)
+            if result:
+                print(f"[OK] Swap state: {result.get('swap', {}).get('state', '')}")
+            return True
+        if code == 'ISSUE_FEE':
+            swap_id = ctx.get('swap_id', '')
+            append_audit_event('cli_action', client_id, swap_id, details={'source': source, 'action': code})
+            invoice = issue_fee_invoice(client_obj, swap_id)
+            print(f"[FEE] Invoice: {invoice.get('invoice_ref','')} status={invoice.get('payment_status','')}")
+            return True
+        if code == 'CONFIRMAR_FEE':
+            swap_id = ctx.get('swap_id', '')
+            if input(f"Confirm fee payment for swap {swap_id}? (y/n): ").strip().lower() != 'y':
+                return False
+            payment_ref = input('Payment reference: ').strip()
+            append_audit_event('cli_action', client_id, swap_id, details={'source': source, 'action': code})
+            invoice = confirm_fee_payment(client_obj, swap_id, payment_ref)
+            print(f"[FEE] Status: {invoice.get('payment_status','')}")
+            return True
+    except Exception as e:
+        print(f"[X] Action failed ({code}): {e}")
+    return False
+
+def cli_trade_wizard():
+    print('\n' + '=' * 47)
+    print('  NEW TRADE (WIZARD)')
+    print('=' * 47)
+    maker_client_id = input('Maker client ID: ').strip()
+    maker_wallet = input('Maker wallet (0x...): ').strip()
+    sell_asset = input('Sell asset (e.g. BTC): ').strip().upper()
+    buy_asset = input('Buy asset (e.g. USDT): ').strip().upper()
+    amount = float(input('Amount: ').strip())
+    price_min = float(input('Price min: ').strip())
+    price_max = float(input('Price max: ').strip())
+    expires_sec = int(input('Expiration seconds from now [900]: ').strip() or '900')
+    wallet_nonce = input('Wallet nonce (optional): ').strip()
+    _cli_auto_bind_wallet(maker_client_id, maker_wallet)
+    client_obj = _cli_otc_client(maker_client_id)
+    payload = {
+        'maker_wallet': maker_wallet,
+        'sell_asset': sell_asset,
+        'buy_asset': buy_asset,
+        'amount': amount,
+        'price_min': price_min,
+        'price_max': price_max,
+        'expiration': int(time.time() * 1000) + expires_sec * 1000,
+        'wallet_nonce': wallet_nonce
+    }
+    if WALLET_ATTESTATION_REQUIRED:
+        prepared = prepare_trade_intent_signature(client_obj, payload)
+        auto_signature = ''
+        try:
+            auto_signature = _sign_message_with_env_wallet(prepared['message'], maker_wallet)
+        except Exception as e:
+            print(f"[WARN] Auto-sign unavailable: {e}")
+        if auto_signature:
+            payload['wallet_signature'] = auto_signature
+            print('[SIGN] wallet_signature applied from ONESEAM_WALLET_PRIVATE_KEY')
+        else:
+            print('[SIGN] Sign this message with your wallet:')
+            print(prepared['message'])
+            payload['wallet_signature'] = input('wallet_signature (0x...): ').strip()
+    intent = create_trade_intent(client_obj, payload)
+    append_audit_event('cli_action', maker_client_id, intent.get('intent_id', ''), details={'source': 'wizard', 'action': 'CREATE_INTENT'})
+    print(f"[OK] Intent created: {intent['intent_id']}")
+    if not intent.get('matches_detected'):
+        print('[INFO] No immediate match. Use "Pendencias" ou "Meus Trades".')
+        return
+    print(f"[MATCH] Candidates: {', '.join(intent.get('matches_detected', []))}")
+    selected_match = intent.get('matches_detected', [])[0]
+    if len(intent.get('matches_detected', [])) > 1:
+        chosen = input(f"Select match ID [{selected_match}]: ").strip()
+        if chosen:
+            selected_match = chosen
+    if input(f"Abrir sessao para match {selected_match}? (y/n): ").strip().lower() != 'y':
+        return
+    opened = open_secure_session(client_obj, selected_match)
+    swap = opened.get('swap') or {}
+    print(f"[OK] Session opened, swap={swap.get('swap_id','')} state={swap.get('state','')}")
+    if input('Iniciar coordenacao HTLC agora? (y/n): ').strip().lower() == 'y':
+        swap = start_htlc_coordination(client_obj, selected_match)
+    while True:
+        swap = get_swap_status(client_obj, swap.get('swap_id', ''))
+        invoice = STORAGE_DB.get_latest_fee_invoice(swap.get('swap_id', '')) if swap else None
+        print('[SUMMARY]', render_trade_summary(intent=intent, match=STORAGE_DB.get_match(selected_match), swap=swap, fee_invoice=invoice))
+        next_actions = compute_next_actions(intent=intent, match=STORAGE_DB.get_match(selected_match), session=opened.get('session'), swap=swap, fee_invoice=invoice, client_id=maker_client_id)
+        if not next_actions:
+            print('[INFO] No next actions.')
+            return
+        recommended = next_actions[0]
+        print(f"[NEXT] Recommended: {recommended.get('label')} ({recommended.get('code')})")
+        if recommended.get('auto') and not recommended.get('risky'):
+            proceed = input('Execute recommended action now? (y/n): ').strip().lower() == 'y'
+            if proceed:
+                _execute_next_action(maker_client_id, recommended, source='wizard')
+                continue
+        print('Available actions:')
+        for idx, act in enumerate(next_actions, start=1):
+            mark = 'RISK' if act.get('risky') else 'SAFE'
+            print(f"  {idx}. {act.get('label')} [{mark}]")
+        print(f"  {len(next_actions)+1}. Finish")
+        choice = input('Select option: ').strip()
+        if choice == str(len(next_actions)+1):
+            return
+        try:
+            selected = next_actions[int(choice)-1]
+        except Exception:
+            print('[!] Invalid option.')
+            continue
+        _execute_next_action(maker_client_id, selected, source='wizard')
+
+def cli_commit_trade_intent():
+    """
+    Commit an intent into the network.
+    This is the explicit 'commit' step: intent publication for matching.
+    """
+    print('\n' + '=' * 47)
+    print('  COMMIT TRADE INTENT')
+    print('=' * 47)
+    maker_client_id = input('Maker client ID: ').strip()
+    maker_wallet = input('Maker wallet (0x...): ').strip()
+    sell_asset = input('Sell asset (e.g. BTC): ').strip().upper()
+    buy_asset = input('Buy asset (e.g. USDT): ').strip().upper()
+    amount = float(input('Amount: ').strip())
+    price_min = float(input('Price min: ').strip())
+    price_max = float(input('Price max: ').strip())
+    expires_sec = int(input('Expiration seconds from now [900]: ').strip() or '900')
+    wallet_nonce = input('Wallet nonce (optional): ').strip()
+    _cli_auto_bind_wallet(maker_client_id, maker_wallet)
+    client_obj = _cli_otc_client(maker_client_id)
+    payload = {
+        'maker_wallet': maker_wallet,
+        'sell_asset': sell_asset,
+        'buy_asset': buy_asset,
+        'amount': amount,
+        'price_min': price_min,
+        'price_max': price_max,
+        'expiration': int(time.time() * 1000) + expires_sec * 1000,
+        'wallet_nonce': wallet_nonce
+    }
+    if WALLET_ATTESTATION_REQUIRED:
+        prepared = prepare_trade_intent_signature(client_obj, payload)
+        auto_signature = ''
+        try:
+            auto_signature = _sign_message_with_env_wallet(prepared['message'], maker_wallet)
+        except Exception as e:
+            print(f"[WARN] Auto-sign unavailable: {e}")
+        if auto_signature:
+            payload['wallet_signature'] = auto_signature
+            print('[SIGN] wallet_signature applied from ONESEAM_WALLET_PRIVATE_KEY')
+        else:
+            print('[SIGN] Sign this message with your wallet:')
+            print(prepared['message'])
+            payload['wallet_signature'] = input('wallet_signature (0x...): ').strip()
+    intent = create_trade_intent(client_obj, payload)
+    append_audit_event('cli_action', maker_client_id, intent.get('intent_id', ''), details={'source': 'manual', 'action': 'COMMIT_INTENT'})
+    print(f"[OK] Intent committed: {intent['intent_id']}")
+    if intent.get('matches_detected'):
+        print(f"[MATCH] Found: {', '.join(intent.get('matches_detected', []))}")
+        print('[NEXT] Use option "Accept Trade (from Match)".')
+
+def cli_accept_trade_from_match():
+    """
+    Accept a matched trade and move it to session/swap coordination.
+    """
+    print('\n' + '=' * 47)
+    print('  ACCEPT TRADE (FROM MATCH)')
+    print('=' * 47)
+    client_id = input('Actor client ID: ').strip()
+    matches = STORAGE_DB.list_matches_for_client(client_id, limit=100)
+    if not matches:
+        print('[INFO] No matches available for this client.')
+        return
+    for idx, match in enumerate(matches[:20], start=1):
+        print(f"  {idx}. {match.get('match_id','')} | status={match.get('status','')} | "
+              f"overlap={match.get('overlap_min','')}-{match.get('overlap_max','')}")
+    raw = input('Select match number or enter match_id: ').strip()
+    match_id = ''
+    if raw.isdigit():
+        pick = int(raw)
+        if pick < 1 or pick > min(20, len(matches)):
+            print('[!] Invalid option.')
+            return
+        match_id = matches[pick - 1].get('match_id', '')
+    else:
+        match_id = raw
+    if not match_id:
+        print('[!] Match ID required.')
+        return
+    confirm = input(f'Accept trade for match {match_id}? (y/n): ').strip().lower()
+    if confirm != 'y':
+        return
+    client_obj = _cli_otc_client(client_id)
+    opened = open_secure_session(client_obj, match_id)
+    swap = start_htlc_coordination(client_obj, match_id)
+    append_audit_event('cli_action', client_id, match_id, details={'source': 'manual', 'action': 'ACCEPT_TRADE'})
+    print(f"[OK] Trade accepted: match={match_id}")
+    print(f"[OK] Session: {opened.get('session', {}).get('session_id', '')}")
+    print(f"[OK] Swap: {swap.get('swap_id', '')} | state={swap.get('state', '')}")
+    print('[NEXT] Continue in Pending Actions/My Trades for lock/claim proofs.')
+
+def cli_pending_actions():
+    print('\n' + '=' * 47)
+    print('  PENDING ACTIONS')
+    print('=' * 47)
+    client_id = input('Client ID: ').strip()
+    pending: List[Dict[str, Any]] = []
+    intents = STORAGE_DB.list_trade_intents_for_client(client_id, limit=100)
+    matches_map = {m.get('match_id', ''): m for m in STORAGE_DB.list_matches_for_client(client_id, limit=200)}
+    for intent in intents:
+        related_match = None
+        for m in matches_map.values():
+            if intent.get('intent_id') in (m.get('intent_sell_id'), m.get('intent_buy_id')):
+                related_match = m
+                break
+        session = STORAGE_DB.get_secure_session_by_match(related_match.get('match_id', '')) if related_match else None
+        swap = None
+        if related_match:
+            for s in _list_swaps_for_client(client_id, limit=200):
+                if s.get('match_id') == related_match.get('match_id'):
+                    swap = s
+                    break
+        fee_invoice = STORAGE_DB.get_latest_fee_invoice(swap.get('swap_id', '')) if swap else None
+        for act in compute_next_actions(intent=intent, match=related_match, session=session, swap=swap, fee_invoice=fee_invoice, client_id=client_id):
+            item = dict(act)
+            item['intent_id'] = intent.get('intent_id', '')
+            item['match_id'] = related_match.get('match_id', '') if related_match else ''
+            item['swap_id'] = swap.get('swap_id', '') if swap else ''
+            pending.append(item)
+    pending.sort(key=lambda x: int(x.get('priority', 999)))
+    if not pending:
+        print('[INFO] No pending actions.')
+        return
+    for idx, act in enumerate(pending, start=1):
+        ref = act.get('swap_id') or act.get('match_id') or act.get('intent_id')
+        mark = 'RISK' if act.get('risky') else 'SAFE'
+        print(f"  {idx}. {act.get('label')} | ref={ref} | {mark}")
+    print(f"  {len(pending)+1}. Back")
+    choice = input('Select action: ').strip()
+    if choice == str(len(pending)+1):
+        return
+    try:
+        action = pending[int(choice)-1]
+    except Exception:
+        print('[!] Invalid option.')
+        return
+    _execute_next_action(client_id, action, source='pending_inbox')
+
+def cli_my_trades():
+    print('\n' + '=' * 47)
+    print('  MY TRADES')
+    print('=' * 47)
+    client_id = input('Client ID: ').strip()
+    status_filter = input('Status filter (optional, e.g. OPEN/MATCHED/SWAP_INIT/COMPLETED): ').strip().upper()
+    intents = STORAGE_DB.list_trade_intents_for_client(client_id, limit=100)
+    matches = STORAGE_DB.list_matches_for_client(client_id, limit=100)
+    swaps = _list_swaps_for_client(client_id, limit=100)
+    if status_filter:
+        intents = [x for x in intents if str(x.get('status', '')).upper() == status_filter]
+        matches = [x for x in matches if str(x.get('status', '')).upper() == status_filter]
+        swaps = [x for x in swaps if str(x.get('state', '')).upper() == status_filter]
+    print(f'Intents: {len(intents)} | Matches: {len(matches)} | Swaps: {len(swaps)}')
+    for item in intents[:20]:
+        print(f"- intent {item.get('intent_id','')} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
+    for item in matches[:20]:
+        print(f"- match {item.get('match_id','')} | status={item.get('status','')}")
+    for item in swaps[:20]:
+        fee = STORAGE_DB.get_latest_fee_invoice(item.get('swap_id', ''))
+        print(f"- {render_trade_summary(swap=item, fee_invoice=fee)}")
+    swap_id = input('Open swap details (swap_id, optional): ').strip()
+    if not swap_id:
+        return
+    swap = get_swap_status(_cli_otc_client(client_id), swap_id)
+    fee = STORAGE_DB.get_latest_fee_invoice(swap_id)
+    print(render_trade_summary(swap=swap, fee_invoice=fee))
+    actions = compute_next_actions(swap=swap, fee_invoice=fee, client_id=client_id)
+    if not actions:
+        print('[INFO] No actions available for this swap.')
+        return
+    for idx, act in enumerate(actions, start=1):
+        print(f"  {idx}. {act.get('label')}")
+    print(f"  {len(actions)+1}. Back")
+    choice = input('Select action: ').strip()
+    if choice == str(len(actions)+1):
+        return
+    try:
+        _execute_next_action(client_id, actions[int(choice)-1], source='my_trades')
+    except Exception:
+        print('[!] Invalid option.')
+
+def cli_admin_menu():
+    while True:
+        print('\n' + '='*47)
+        print('  ONESEAM ADMIN/TECHNICAL')
+        print('='*47)
+        print('  1. Node Status')
+        print('  2. Audit DarkPool')
+        print('  3. Monitor Intent Status')
+        print('  4. View Matches')
+        print('  5. Monitor Swap')
+        print('  6. Legacy OTC Menu (Deprecated)')
+        print('  7. Back')
+        choice = input('\nSelect option: ').strip()
+        try:
+            if choice == '1':
+                print_status()
+            elif choice == '2':
+                audit_darkpool()
+            elif choice == '3':
+                cli_monitor_intents()
+            elif choice == '4':
+                cli_view_matches()
+            elif choice == '5':
+                cli_monitor_swap()
+            elif choice == '6':
+                cli_menu_legacy_otc()
+            elif choice == '7':
+                return
+            else:
+                print('[!] Invalid option.')
+        except Exception as e:
+            print(f'[X] Operation failed: {e}')
+
 # ===== CLI MENU =====
 def cli_menu_legacy_otc():
     """Legacy OTC CLI menu (deprecated)."""
@@ -5858,55 +6412,43 @@ def cli_menu_legacy_otc():
             print(f'[X] Operation failed: {e}')
 
 def cli_menu():
-    """Dark-pool CLI menu (default)."""
+    """Operator-focused CLI menu (production desk flow)."""
     if not DARKPOOL_ENABLED:
         print('[INFO] darkpool_enabled=false, switching to legacy OTC menu.')
         cli_menu_legacy_otc()
         return
+    show_admin = CLI_ADMIN_UI_MODE or (CLI_MODE_OVERRIDE == 'admin')
     while True:
         print('\n' + '=' * 47)
-        print('  ONESEAM DARK POOL NODE')
+        print('  ONESEAM DESK FLOW')
         print('=' * 47)
         print('  1. Node Status')
-        print('  2. Create Trade Intent')
-        print('  3. Monitor Intent Status')
-        print('  4. View Matches')
-        print('  5. Open Secure Session')
-        print('  6. Start HTLC Coordination')
-        print('  7. Submit HTLC Proof')
-        print('  8. Monitor Swap')
-        print('  9. Fee Invoice Status')
-        print('  10. Audit DarkPool')
-        print('  11. Legacy OTC Menu (Deprecated)')
-        print('  12. Exit')
+        print('  2. Commit Trade Intent (for matching)')
+        print('  3. Accept Trade (from match)')
+        print('  4. Exit')
+        if show_admin:
+            print('  9. Admin/Technical')
         choice = input('\nSelect option: ').strip()
         try:
             if choice == '1':
                 print_status()
             elif choice == '2':
-                cli_create_trade_intent()
+                cli_commit_trade_intent()
             elif choice == '3':
-                cli_monitor_intents()
+                cli_accept_trade_from_match()
             elif choice == '4':
-                cli_view_matches()
-            elif choice == '5':
-                cli_open_session()
-            elif choice == '6':
-                cli_start_htlc_coordination()
-            elif choice == '7':
-                cli_submit_htlc_proof()
-            elif choice == '8':
-                cli_monitor_swap()
-            elif choice == '9':
-                cli_fee_invoice_status()
-            elif choice == '10':
-                audit_darkpool()
-            elif choice == '11':
-                cli_menu_legacy_otc()
-            elif choice == '12':
                 print('\n[SHUTDOWN] Stopping node...')
                 local_test_registry_cleanup()
                 raise SystemExit(0)
+            elif choice == '9' and show_admin:
+                cli_admin_menu()
+            elif choice in ('99', ':admin'):
+                admin_client_id = input('Admin client ID: ').strip()
+                admin_client = _cli_otc_client(admin_client_id)
+                if 'admin' not in (admin_client.get('roles') or []):
+                    print('[X] Admin role required.')
+                else:
+                    cli_admin_menu()
             else:
                 print('[!] Invalid option.')
         except Exception as e:
@@ -6798,6 +7340,7 @@ if __name__ == '__main__':
         else:
             print('[MODE] Starting in CLI mode')
             print('[INFO] For API mode, run: python oneseam.py api')
+            print('[INFO] For admin UI, run: python oneseam.py --admin-ui')
             await asyncio.to_thread(cli_menu)
 
     try:
