@@ -23,6 +23,8 @@ class TestDarkPoolV2Flow(unittest.TestCase):
         self.prev_proof_wallet_attestation_required = oe.PROOF_WALLET_ATTESTATION_REQUIRED
         self.prev_proof_server_side_verification_required = oe.PROOF_SERVER_SIDE_VERIFICATION_REQUIRED
         self.prev_proof_verifier_url = oe.PROOF_VERIFIER_URL
+        self.prev_blind_matching_enabled = oe.BLIND_MATCHING_ENABLED
+        self.prev_blind_price_slot_size = oe.BLIND_PRICE_SLOT_SIZE
 
         oe.KEY_PROVIDER = oe.LocalKeyProvider(os.path.join(self.tmpdir.name, 'keys.json'))
         oe.STORAGE_DB = oe.StorageDB('sqlite', os.path.join(self.tmpdir.name, 'oneseam.db'), '')
@@ -32,6 +34,8 @@ class TestDarkPoolV2Flow(unittest.TestCase):
 
         oe.WALLET_ATTESTATION_REQUIRED = True
         oe.PROOF_WALLET_ATTESTATION_REQUIRED = True
+        oe.BLIND_MATCHING_ENABLED = True
+        oe.BLIND_PRICE_SLOT_SIZE = 100.0
 
         self.alice = {'client_id': 'ALICE', 'roles': ['issuer'], 'claims': {}}
         self.bob = {'client_id': 'BOB', 'roles': ['issuer'], 'claims': {}}
@@ -57,6 +61,8 @@ class TestDarkPoolV2Flow(unittest.TestCase):
         oe.PROOF_WALLET_ATTESTATION_REQUIRED = self.prev_proof_wallet_attestation_required
         oe.PROOF_SERVER_SIDE_VERIFICATION_REQUIRED = self.prev_proof_server_side_verification_required
         oe.PROOF_VERIFIER_URL = self.prev_proof_verifier_url
+        oe.BLIND_MATCHING_ENABLED = self.prev_blind_matching_enabled
+        oe.BLIND_PRICE_SLOT_SIZE = self.prev_blind_price_slot_size
 
     def _mk_exp(self, seconds=600):
         return int(oe.time.time() * 1000) + (seconds * 1000)
@@ -138,6 +144,21 @@ class TestDarkPoolV2Flow(unittest.TestCase):
 
         self.assertEqual(finished['swap']['state'], oe.SWAP_STATE_COMPLETED)
         self.assertIsNotNone(finished.get('fee_invoice'))
+
+    def test_blind_matching_sets_match_metadata(self):
+        oe.create_trade_intent(self.alice, self._signed_intent_payload(
+            self.alice, self.alice_account, 'BTC', 'USDT', 1.0, 49000.0, 51000.0
+        ), request_id='req_blind_a')
+        b = oe.create_trade_intent(self.bob, self._signed_intent_payload(
+            self.bob, self.bob_account, 'USDT', 'BTC', 50000.0, 1 / 51000.0, 1 / 49000.0
+        ), request_id='req_blind_b')
+        self.assertTrue(b.get('matches_detected'))
+        match = oe.STORAGE_DB.get_match(b['matches_detected'][0])
+        self.assertIsNotNone(match)
+        metadata = match.get('metadata') or {}
+        self.assertTrue(metadata.get('blind_matched'))
+        self.assertEqual(metadata.get('matching_method'), 'blind_token_overlap')
+        self.assertGreater(int(metadata.get('blind_overlap_tokens', 0)), 0)
 
     def test_trade_intent_requires_wallet_signature(self):
         payload = {

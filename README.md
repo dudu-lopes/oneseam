@@ -6,6 +6,7 @@ A plataforma **nao custodia fundos** e **nao assina transacoes do usuario** no b
 
 ## Arquivos principais do projeto
 - `oneseam.py` (entrypoint principal)
+- `oneseam_blind_matching.py` (motor de commitments por price slot para blind match)
 - `oneseam_config.yaml` (config ativa)
 - `requirements.txt`
 - `README.md`
@@ -58,6 +59,18 @@ Se a wallet da acao bater com a chave do ambiente, a assinatura e aplicada autom
 - `GET /v2/swaps/{swap_id}`
 - `POST /v2/swaps/{swap_id}/fee/invoice`
 - `POST /v2/swaps/{swap_id}/fee/confirm`
+
+## Blind Match (privacy-preserving)
+- O sistema usa commitments por `price slots` para filtro de match sem expor faixa de preco em claro na fase A.
+- O overlap final continua validado matematicamente no backend (fase B) antes de abrir sessao/swap.
+- Commitment publico (hashes) pode ser shardado e distribuido no destino `blind_orderbook`.
+
+Configuracao principal em `oneseam_config.yaml`:
+- `blind_matching_enabled`
+- `blind_price_slot_size`
+- `blind_max_price_slots`
+- `blind_global_salt`
+- `blind_commitment_destination`
 
 ## Producao real (mesa OTC)
 No `oneseam_config.yaml`:

@@ -84,6 +84,11 @@ darkpool_enabled: true
 production_mode: false
 intent_bucket_size_price: 100.0
 intent_bucket_size_amount: 0.1
+blind_matching_enabled: true
+blind_price_slot_size: 100.0
+blind_max_price_slots: 2048
+blind_global_salt: "ONESEAM_BLIND_MATCHING_V1_PRICE_SLOTS"
+blind_commitment_destination: "blind_orderbook"
 session_handshake_ttl_seconds: 600
 htlc_chain_a: "BTC"
 htlc_chain_b: "LIGHTNING"

@@ -1,5 +1,5 @@
 """
-ONESEAM Enterprise - DarkPool P2P Non-Custodial Trading Coordination
+ONESEAM - DarkPool P2P Non-Custodial Trading Coordination
 Version: 3.2.0
 
 Enterprise-grade decentralized coordination with privacy-preserving transport.
@@ -98,6 +98,28 @@ try:
     PYDANTIC_AVAILABLE = True
 except ImportError:
     PYDANTIC_AVAILABLE = False
+
+# Blind matching primitives (optional local module)
+try:
+    from oneseam_blind_matching import (
+        DEFAULT_GLOBAL_SALT as BLIND_DEFAULT_GLOBAL_SALT,
+        build_blind_commitment_meta,
+        blind_overlap_tokens,
+        build_public_blind_commitment
+    )
+    BLIND_MATCHING_AVAILABLE = True
+except ImportError:
+    BLIND_MATCHING_AVAILABLE = False
+    BLIND_DEFAULT_GLOBAL_SALT = "ONESEAM_BLIND_MATCHING_V1_PRICE_SLOTS"
+
+    def build_blind_commitment_meta(*args, **kwargs):
+        raise RuntimeError("blind_matching_module_unavailable")
+
+    def blind_overlap_tokens(meta_a, meta_b):
+        return None
+
+    def build_public_blind_commitment(intent, commitment_meta):
+        return {}
 
 if PYDANTIC_AVAILABLE:
     class P2PStoreShard(BaseModel):
@@ -378,6 +400,11 @@ DARKPOOL_ENABLED = _as_bool(_config('darkpool_enabled', True))
 LEGACY_OTC_API_ENABLED = _as_bool(_config('legacy_otc_api_enabled', True))
 INTENT_BUCKET_SIZE_PRICE = float(_config('intent_bucket_size_price', 100.0))
 INTENT_BUCKET_SIZE_AMOUNT = float(_config('intent_bucket_size_amount', 0.1))
+BLIND_MATCHING_ENABLED = _as_bool(_config('blind_matching_enabled', True))
+BLIND_PRICE_SLOT_SIZE = float(_config('blind_price_slot_size', _config('price_slot_size', INTENT_BUCKET_SIZE_PRICE)))
+BLIND_MAX_PRICE_SLOTS = int(_config('blind_max_price_slots', 2048))
+BLIND_GLOBAL_SALT = str(_config('blind_global_salt', BLIND_DEFAULT_GLOBAL_SALT))
+BLIND_COMMITMENT_DESTINATION = str(_config('blind_commitment_destination', 'blind_orderbook') or 'blind_orderbook').strip()
 SESSION_HANDSHAKE_TTL_SECONDS = int(_config('session_handshake_ttl_seconds', 600))
 HTLC_CHAIN_A = _config('htlc_chain_a', 'BTC')
 HTLC_CHAIN_B = _config('htlc_chain_b', 'LIGHTNING')
@@ -482,6 +509,9 @@ neighbors_lock = threading.Lock()
 QUIET_MODE = True  # Set to True to suppress RELAY logs
 ASYNC_LOOP = None
 RELAY_QUEUE = asyncio.Queue()
+
+if BLIND_MATCHING_ENABLED and not BLIND_MATCHING_AVAILABLE:
+    print("[WARNING] blind matching enabled but oneseam_blind_matching.py is not available.")
 
 def run_async(coro):
     global ASYNC_LOOP
@@ -2414,6 +2444,8 @@ def _production_readiness_issues() -> List[str]:
         return issues
     if not DARKPOOL_ENABLED:
         issues.append('darkpool_disabled')
+    if BLIND_MATCHING_ENABLED and not BLIND_MATCHING_AVAILABLE:
+        issues.append('blind_matching_module_missing')
     if LEGACY_OTC_API_ENABLED:
         issues.append('legacy_otc_api_enabled')
     if not TLS_ENABLED:
@@ -3268,7 +3300,7 @@ def _build_commitment_meta(intent: Dict[str, Any]) -> Dict[str, Any]:
     pb_min, pb_max = _bucket_range(intent['price_min'], intent['price_max'], INTENT_BUCKET_SIZE_PRICE)
     ab = _bucket_amount(intent['amount'], INTENT_BUCKET_SIZE_AMOUNT)
     seed = f"{intent['sell_asset']}:{intent['buy_asset']}:{pb_min}:{pb_max}:{ab}"
-    return {
+    meta = {
         'price_bucket_min': pb_min,
         'price_bucket_max': pb_max,
         'amount_bucket': ab,
@@ -3277,6 +3309,19 @@ def _build_commitment_meta(intent: Dict[str, Any]) -> Dict[str, Any]:
         'amount_commitment': generate_dna_hash(f"amount:{ab}"),
         'composite_commitment': generate_dna_hash(seed)
     }
+    if BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE:
+        try:
+            blind_meta = build_blind_commitment_meta(
+                intent,
+                slot_size=BLIND_PRICE_SLOT_SIZE,
+                amount_bucket_size=INTENT_BUCKET_SIZE_AMOUNT,
+                global_salt=BLIND_GLOBAL_SALT,
+                max_slots=BLIND_MAX_PRICE_SLOTS
+            )
+            meta.update(blind_meta)
+        except Exception as exc:
+            meta['blind_matching_error'] = str(exc)
+    return meta
 
 def _normalize_counterparty_allowlist(raw: Any) -> Dict[str, set]:
     parsed: Dict[str, set] = {}
@@ -3358,13 +3403,21 @@ def _compute_overlap(a: Dict[str, Any], b: Dict[str, Any]) -> Optional[Dict[str,
         'quote_asset': a_quote
     }
 
+def _blind_overlap_tokens_for_intents(a: Dict[str, Any], b: Dict[str, Any]) -> Optional[List[str]]:
+    if not BLIND_MATCHING_ENABLED or not BLIND_MATCHING_AVAILABLE:
+        return None
+    a_meta = a.get('commitment_meta') if isinstance(a.get('commitment_meta'), dict) else {}
+    b_meta = b.get('commitment_meta') if isinstance(b.get('commitment_meta'), dict) else {}
+    return blind_overlap_tokens(a_meta, b_meta)
+
 def _bucketed_candidate(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
-    """Phase-A matching filter using bucket commitments only."""
+    """Phase-A matching filter. Uses blind token overlap when available."""
     if a.get('sell_asset') != b.get('buy_asset') or a.get('buy_asset') != b.get('sell_asset'):
         return False
-    # Opposite intents use different quoting units, so bucket overlap is resolved in phase-B.
-    # Phase-A keeps only pair direction filtering to avoid leaking full order details.
-    return True
+    overlap_tokens = _blind_overlap_tokens_for_intents(a, b)
+    if overlap_tokens is None:
+        return True
+    return len(overlap_tokens) > 0
 
 def _persist_private_trade_intent(intent: Dict[str, Any], private_terms: Optional[Dict[str, Any]]) -> str:
     payload_obj = {
@@ -3379,6 +3432,30 @@ def _persist_private_trade_intent(intent: Dict[str, Any], private_terms: Optiona
         'private_terms': private_terms or {}
     }
     return _persist_private_otc_payload(intent['maker_client_id'], intent['maker_client_id'], payload_obj)
+
+def _broadcast_blind_commitment(intent: Dict[str, Any], request_id: str = '') -> str:
+    if not BLIND_MATCHING_ENABLED or not BLIND_MATCHING_AVAILABLE:
+        return ''
+    commitment_meta = intent.get('commitment_meta') if isinstance(intent.get('commitment_meta'), dict) else {}
+    if not commitment_meta:
+        return ''
+    payload_obj = build_public_blind_commitment(intent, commitment_meta)
+    if not payload_obj or not payload_obj.get('blind_slot_tokens'):
+        return ''
+    destination = BLIND_COMMITMENT_DESTINATION or 'blind_orderbook'
+    instruction_id = _persist_private_otc_payload(intent['maker_client_id'], destination, payload_obj)
+    append_audit_event(
+        'blind_commitment_broadcast',
+        intent['maker_client_id'],
+        intent['intent_id'],
+        details={
+            'instruction_id': instruction_id,
+            'destination': destination,
+            'token_count': int(payload_obj.get('blind_slot_token_count', 0))
+        },
+        request_id=request_id
+    )
+    return instruction_id
 
 def _refresh_intent_expiry_state(intent: Dict[str, Any]):
     if intent.get('status') == INTENT_STATUS_OPEN and _is_intent_expired(intent):
@@ -3403,9 +3480,12 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
             continue
         if STORAGE_DB.find_match_by_intents(new_intent['intent_id'], other['intent_id']):
             continue
+        blind_overlap = _blind_overlap_tokens_for_intents(new_intent, other)
         overlap = _compute_overlap(new_intent, other)
         if not overlap:
             continue
+        matched_by_blind_tokens = bool(blind_overlap)
+        match_method = 'blind_token_overlap' if matched_by_blind_tokens else 'pair_filter'
         match_id = generate_match_id()
         match = {
             'match_id': match_id,
@@ -3420,21 +3500,27 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
                 'base_asset': overlap['base_asset'],
                 'quote_asset': overlap['quote_asset'],
                 'participants': [new_intent['maker_client_id'], other['maker_client_id']],
-                'darkpool': True
+                'darkpool': True,
+                'blind_matching_enabled': bool(BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE),
+                'blind_matched': matched_by_blind_tokens,
+                'matching_method': match_method,
+                'blind_overlap_tokens': len(blind_overlap or [])
             }
         }
         STORAGE_DB.create_match(match)
         STORAGE_DB.update_trade_intent_status(new_intent['intent_id'], INTENT_STATUS_MATCHED)
         STORAGE_DB.update_trade_intent_status(other['intent_id'], INTENT_STATUS_MATCHED)
         append_audit_event(
-            'match_detected',
+            'blind_match_detected' if matched_by_blind_tokens else 'match_detected',
             new_intent['maker_client_id'],
             match_id,
             details={
                 'intent_a': new_intent['intent_id'],
                 'intent_b': other['intent_id'],
                 'overlap_min': overlap['overlap_min'],
-                'overlap_max': overlap['overlap_max']
+                'overlap_max': overlap['overlap_max'],
+                'matching_method': match_method,
+                'blind_overlap_tokens': len(blind_overlap or [])
             },
             request_id=request_id
         )
@@ -3508,6 +3594,20 @@ def create_trade_intent(client: Dict[str, Any], data: Dict[str, Any], request_id
     intent['private_instruction_id'] = private_instruction_id
     STORAGE_DB.create_trade_intent(intent)
     STORAGE_DB.link_intent_shard(intent_id, private_instruction_id, private_instruction_id)
+    blind_commitment_instruction_id = ''
+    try:
+        blind_commitment_instruction_id = _broadcast_blind_commitment(intent, request_id=request_id)
+        if blind_commitment_instruction_id:
+            STORAGE_DB.link_intent_shard(intent_id, blind_commitment_instruction_id, blind_commitment_instruction_id)
+            intent['blind_commitment_instruction_id'] = blind_commitment_instruction_id
+    except Exception as exc:
+        append_audit_event(
+            'blind_commitment_broadcast_failed',
+            client['client_id'],
+            intent_id,
+            details={'error': str(exc)},
+            request_id=request_id
+        )
     append_audit_event(
         'intent_created',
         client['client_id'],
@@ -4091,6 +4191,7 @@ def print_status():
     relay_status = 'Blind Relay ON' if BLIND_RELAY_ENABLED else 'Blind Relay OFF'
     print(f'Transport: {TRANSPORT_MODE} | Quorum: {DEFAULT_QUORUM_K}-of-{DEFAULT_QUORUM_N} | {relay_status}')
     print(f'Domain: DarkPool P2P (enabled={DARKPOOL_ENABLED}) | Legacy OTC API (enabled={LEGACY_OTC_API_ENABLED})')
+    print(f'Blind Matching: enabled={BLIND_MATCHING_ENABLED} | available={BLIND_MATCHING_AVAILABLE} | slot={BLIND_PRICE_SLOT_SIZE}')
     shard_count = len(list_shards())
     manifest_count = len(list_manifest_records())
     intent_count = len(STORAGE_DB.list_open_trade_intents())
