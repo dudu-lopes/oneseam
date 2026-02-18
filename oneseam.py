@@ -6696,7 +6696,7 @@ if __name__ == '__main__':
             await asyncio.Event().wait()
         else:
             print('[MODE] Starting in CLI mode')
-            print('[INFO] For API mode, run: python oneseam_enterprise.py api')
+            print('[INFO] For API mode, run: python oneseam.py api')
             await asyncio.to_thread(cli_menu)
 
     try:

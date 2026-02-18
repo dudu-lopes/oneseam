@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-import oneseam_enterprise as oe
+import oneseam as oe
 
 
 class FakeEscrow:

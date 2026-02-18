@@ -6,7 +6,6 @@ A plataforma **nao custodia fundos** e **nao assina transacoes do usuario** no b
 
 ## Arquivos principais do projeto
 - `oneseam.py` (entrypoint principal)
-- `oneseam_enterprise.py` (launcher de compatibilidade)
 - `oneseam_config.yaml` (config ativa)
 - `requirements.txt`
 - `README.md`
@@ -36,10 +35,6 @@ API:
 python oneseam.py api
 ```
 
-Compatibilidade (scripts antigos):
-```bash
-python oneseam_enterprise.py api
-```
 
 ## UX simples de wallet (CLI)
 Opcionalmente, para auto-assinar no CLI sem copiar mensagem manualmente:
