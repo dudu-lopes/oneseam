@@ -1,5 +1,5 @@
-# Oneseam OTC Configuration
-# Version: 2.0
+# ONESEAM DarkPool Configuration
+# Version: 3.0
 
 # Node settings
 node_port: 5001
@@ -79,7 +79,40 @@ trusted_node_pubkeys: {}  # {NODE_ID: "-----BEGIN PUBLIC KEY-----..."}
 key_store_path: "oneseam_keys.json"
 signing_key_id: "node_signing"
 
-# OTC domain (public API/CLI)
+# DarkPool v2 (primary API/CLI)
+darkpool_enabled: true
+production_mode: false
+intent_bucket_size_price: 100.0
+intent_bucket_size_amount: 0.1
+session_handshake_ttl_seconds: 600
+htlc_chain_a: "BTC"
+htlc_chain_b: "LIGHTNING"
+htlc_min_confirmations: 1
+htlc_timeout_lock_a_seconds: 7200
+htlc_timeout_lock_b_seconds: 3600
+swap_timeout_sweep_interval_seconds: 5
+swap_enforce_side_proofs: true
+wallet_attestation_required: true
+proof_wallet_attestation_required: true
+proof_server_side_verification_required: false
+proof_verifier_url: ""
+proof_verifier_auth_token: ""
+proof_verifier_timeout_seconds: 8
+btc_rpc_url: ""
+btc_rpc_user: ""
+btc_rpc_password: ""
+btc_rpc_timeout_seconds: 8
+intent_min_expiration_seconds: 30
+intent_max_expiration_seconds: 86400
+intent_max_notional: 10000000
+fee_bps: 1  # 0.01%
+fee_lightning_endpoint: ""
+counterparty_allowlist: {} # optional: {TRADER_A: [TRADER_B, TRADER_C]}
+
+# Legacy OTC v1 transition switch (deprecated surface kept temporarily)
+legacy_otc_api_enabled: true
+
+# OTC legacy domain (deprecated, kept during dual API transition)
 otc_enabled: true
 wallet_binding_required: true
 allowed_base_assets: ["BTC", "ETH", "SOL"]
@@ -87,7 +120,7 @@ allowed_quote_assets: ["USDT", "USDC", "USD"]
 otc_default_fee_bps: 20
 otc_max_trade_notional: 10000000
 
-# EVM escrow integration (non-custodial)
+# Legacy EVM escrow integration (deprecated with v1 OTC)
 # Node only verifies externally submitted tx hashes.
 evm_rpc_url: ""
 evm_chain_id: 11155111
@@ -101,7 +134,7 @@ escrow_prepare_ttl_seconds: 600
 escrow_event_strict_validation: true
 escrow_reconcile_interval_seconds: 20
 
-# Optional token metadata (used to encode amounts for prepare payloads)
+# Optional token metadata (legacy OTC prepare payload helper)
 otc_assets:
   BTC:
     decimals: 8

@@ -36,3 +36,12 @@ Thumbs.db
 shard_signing_priv.pem
 shard_signing_pub.pem
 oneseam_keys.json
+
+# Production secrets/certs (keep only placeholders in repo)
+certs/*
+!certs/.gitkeep
+secrets/*
+!secrets/.gitkeep
+
+# Local production overrides
+config/*.local.yaml
