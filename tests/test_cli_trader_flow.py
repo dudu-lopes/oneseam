@@ -12,8 +12,8 @@ class TestCliTraderFlowActions(unittest.TestCase):
         }
         actions = oe.compute_next_actions(swap=swap, client_id='ALICE')
         codes = [a['code'] for a in actions]
-        self.assertIn('ENVIAR_LOCK_A', codes)
-        self.assertEqual(actions[0]['code'], 'ENVIAR_LOCK_A')
+        self.assertIn('SEND_LOCK_A', codes)
+        self.assertEqual(actions[0]['code'], 'SEND_LOCK_A')
 
     def test_compute_next_actions_ready_claim_for_peer_b(self):
         swap = {
@@ -23,8 +23,8 @@ class TestCliTraderFlowActions(unittest.TestCase):
         }
         actions = oe.compute_next_actions(swap=swap, client_id='BOB')
         codes = [a['code'] for a in actions]
-        self.assertIn('ENVIAR_CLAIM_B', codes)
-        self.assertNotIn('ENVIAR_CLAIM_A', codes)
+        self.assertIn('SEND_CLAIM_B', codes)
+        self.assertNotIn('SEND_CLAIM_A', codes)
 
     def test_compute_next_actions_completed_fee_pending(self):
         swap = {
@@ -35,7 +35,7 @@ class TestCliTraderFlowActions(unittest.TestCase):
         invoice = {'payment_status': 'pending'}
         actions = oe.compute_next_actions(swap=swap, fee_invoice=invoice, client_id='ALICE')
         codes = [a['code'] for a in actions]
-        self.assertIn('CONFIRMAR_FEE', codes)
+        self.assertIn('CONFIRM_FEE', codes)
         self.assertNotIn('ISSUE_FEE', codes)
 
     def test_compute_next_actions_completed_without_invoice(self):

@@ -1,31 +1,31 @@
 ﻿# ONESEAM DarkPool
 
-Infraestrutura P2P non-custodial para descoberta privada de ordens, matching privado e coordenacao de settlement via HTLC (BTC + Lightning first).
+A non-custodial P2P infrastructure for private order discovery, private matching, and HTLC settlement coordination (BTC + Lightning first).
 
-A plataforma **nao custodia fundos** e **nao assina transacoes do usuario** no backend.
+The platform **does not custody funds** and **does not sign user transactions** on the backend.
 
-## Arquivos principais do projeto
-- `oneseam.py` (entrypoint principal)
-- `oneseam_blind_matching.py` (motor de commitments por price slot para blind match)
-- `oneseam_config.yaml` (config ativa)
+## Core Project Files
+- `oneseam.py` (main entrypoint)
+- `oneseam_blind_matching.py` (price-slot commitment engine for blind matching)
+- `oneseam_config.yaml` (active configuration)
 - `requirements.txt`
 - `README.md`
 
-## Estrutura recomendada para producao
-- `config/production.example.yaml` (modelo de configuracao)
-- `docs/PRODUCTION_FILES.md` (checklist de arquivos)
+## Recommended Production Structure
+- `config/production.example.yaml` (configuration template)
+- `docs/PRODUCTION_FILES.md` (file checklist)
 - `scripts/run_api.ps1`
 - `scripts/run_cli.ps1`
 - `scripts/check_ready.ps1`
-- `certs/` (certificados reais no deploy)
-- `secrets/` (segredos locais no deploy)
+- `certs/` (real certificates in deployment)
+- `secrets/` (local deployment secrets)
 
-## Instalar
+## Install
 ```bash
 pip install -r requirements.txt
 ```
 
-## Rodar
+## Run
 CLI:
 ```bash
 python oneseam.py
@@ -36,29 +36,28 @@ API:
 python oneseam.py api
 ```
 
-Admin/Tecnico (oculto por padrao):
+Admin/Technical UI (hidden by default):
 ```bash
 python oneseam.py --admin-ui
 ```
 
-
-## UX simples de wallet (CLI)
-Opcionalmente, para auto-assinar no CLI sem copiar mensagem manualmente:
+## Wallet UX (CLI)
+Optional: enable auto-signing in CLI without manually copying the message:
 
 ```bash
 export ONESEAM_WALLET_PRIVATE_KEY=0x...
 ```
 
-Se a wallet da acao bater com a chave do ambiente, a assinatura e aplicada automaticamente.
+If the action wallet matches the environment key, the signature is applied automatically.
 
-## Trader Flow (CLI condensado)
-Menu principal do operador:
+## Trader Flow (Condensed CLI)
+Operator main menu:
 - `1. Node Status`
 - `2. Commit Trade Intent (for matching)`
 - `3. Accept Trade (from match)`
 - `4. Exit`
 
-Funcoes tecnicas ficam fora do fluxo principal (modo admin).
+Technical functions are kept outside the primary flow (admin mode).
 
 ## API v2 (DarkPool)
 - `POST /v2/intents/prepare-signature`
@@ -75,39 +74,39 @@ Funcoes tecnicas ficam fora do fluxo principal (modo admin).
 - `POST /v2/swaps/{swap_id}/fee/confirm`
 
 ## Blind Match (privacy-preserving)
-- O sistema usa commitments por `price slots` para filtro de match sem expor faixa de preco em claro na fase A.
-- O overlap final continua validado matematicamente no backend (fase B) antes de abrir sessao/swap.
-- Commitment publico (hashes) pode ser shardado e distribuido no destino `blind_orderbook`.
+- The system uses `price slot` commitments for phase-A filtering without exposing clear-text price ranges.
+- Final overlap is still mathematically validated in the backend (phase B) before opening session/swap.
+- Public commitments (hashes) can be sharded and distributed to the `blind_orderbook` destination.
 
-Configuracao principal em `oneseam_config.yaml`:
+Main configuration keys in `oneseam_config.yaml`:
 - `blind_matching_enabled`
 - `blind_price_slot_size`
 - `blind_max_price_slots`
 - `blind_global_salt`
 - `blind_commitment_destination`
 
-## Producao real (mesa OTC)
-No `oneseam_config.yaml`:
+## Real Production (OTC Desk)
+In `oneseam_config.yaml`:
 - `production_mode: true`
 - `legacy_otc_api_enabled: false`
-- TLS REST ativo + JWT only (`allow_legacy_api_keys: false`)
-- P2P TLS + mTLS ativos
+- REST TLS enabled + JWT only (`allow_legacy_api_keys: false`)
+- P2P TLS + mTLS enabled
 - `wallet_attestation_required: true`
 - `proof_wallet_attestation_required: true`
 - `proof_server_side_verification_required: true`
-- Configurar verificador:
-  - `proof_verifier_url` (BTC/LN verifier externo), ou
-  - `btc_rpc_url` para verificacao BTC-side
+- Configure verifier:
+  - `proof_verifier_url` (external BTC/LN verifier), or
+  - `btc_rpc_url` for BTC-side verification
 
-Valide readiness antes de abrir:
+Validate readiness before opening:
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/check_ready.ps1 -BaseUrl http://127.0.0.1:8000
 ```
 
-## Arquivos necessarios para mesa real
-Veja checklist completo em `docs/PRODUCTION_FILES.md`.
+## Required Files for a Real Desk
+See the full checklist in `docs/PRODUCTION_FILES.md`.
 
-Resumo curto:
-- necessarios em repo: codigo + config + scripts + docs
-- necessarios no ambiente: certs reais, JWT pubkeys, segredos de verificador/BTC RPC
-- nunca versionar chaves privadas e tokens de producao
+Short summary:
+- required in repo: code + config + scripts + docs
+- required in environment: real certs, JWT public keys, verifier/BTC RPC secrets
+- never version production private keys and tokens

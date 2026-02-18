@@ -5855,8 +5855,8 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
         wallet_att = (intent.get('metadata') or {}).get('wallet_attestation', {})
         if wallet_att and not wallet_att.get('verified'):
             actions.append(_action_def(
-                'ASSINAR_INTENT',
-                'Assinar intent pendente',
+                'SIGN_INTENT',
+                'Sign pending intent',
                 1,
                 {'intent_id': intent.get('intent_id', '')},
                 risky=False,
@@ -5866,7 +5866,7 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
     if match and not session:
         actions.append(_action_def(
             'OPEN_SESSION',
-            'Abrir sessao segura',
+            'Open secure session',
             20,
             {'match_id': match.get('match_id', '')},
             risky=False,
@@ -5876,7 +5876,7 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
     if session and not swap:
         actions.append(_action_def(
             'START_SWAP',
-            'Iniciar coordenacao HTLC',
+            'Start HTLC coordination',
             25,
             {'match_id': session.get('match_id', '')},
             risky=False,
@@ -5895,32 +5895,32 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
 
         if state in (SWAP_STATE_INIT, SWAP_STATE_WAIT_LOCK_A):
             if allowed(peer_a):
-                actions.append(_action_def('ENVIAR_LOCK_A', 'Enviar prova lock_a', 10, {'swap_id': swap_id, 'proof_type': 'lock_a'}))
+                actions.append(_action_def('SEND_LOCK_A', 'Submit lock_a proof', 10, {'swap_id': swap_id, 'proof_type': 'lock_a'}))
         if state == SWAP_STATE_WAIT_LOCK_B:
             if allowed(peer_b):
-                actions.append(_action_def('ENVIAR_LOCK_B', 'Enviar prova lock_b', 11, {'swap_id': swap_id, 'proof_type': 'lock_b'}))
+                actions.append(_action_def('SEND_LOCK_B', 'Submit lock_b proof', 11, {'swap_id': swap_id, 'proof_type': 'lock_b'}))
             if allowed(peer_a):
-                actions.append(_action_def('REFUND_A', 'Executar refund_a', 80, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
+                actions.append(_action_def('REFUND_A', 'Execute refund_a', 80, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
             if allowed(peer_b):
-                actions.append(_action_def('REFUND_B', 'Executar refund_b', 81, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
+                actions.append(_action_def('REFUND_B', 'Execute refund_b', 81, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
         if state == SWAP_STATE_READY_CLAIM:
             if allowed(peer_a):
-                actions.append(_action_def('ENVIAR_CLAIM_A', 'Enviar prova claim_a', 12, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
+                actions.append(_action_def('SEND_CLAIM_A', 'Submit claim_a proof', 12, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
             if allowed(peer_b):
-                actions.append(_action_def('ENVIAR_CLAIM_B', 'Enviar prova claim_b', 13, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
+                actions.append(_action_def('SEND_CLAIM_B', 'Submit claim_b proof', 13, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
             if allowed(peer_a):
-                actions.append(_action_def('REFUND_A', 'Executar refund_a', 82, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
+                actions.append(_action_def('REFUND_A', 'Execute refund_a', 82, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
             if allowed(peer_b):
-                actions.append(_action_def('REFUND_B', 'Executar refund_b', 83, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
+                actions.append(_action_def('REFUND_B', 'Execute refund_b', 83, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
         if state == SWAP_STATE_CLAIMED_A and allowed(peer_b):
-            actions.append(_action_def('ENVIAR_CLAIM_B', 'Enviar prova claim_b', 14, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
+            actions.append(_action_def('SEND_CLAIM_B', 'Submit claim_b proof', 14, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
         if state == SWAP_STATE_CLAIMED_B and allowed(peer_a):
-            actions.append(_action_def('ENVIAR_CLAIM_A', 'Enviar prova claim_a', 14, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
+            actions.append(_action_def('SEND_CLAIM_A', 'Submit claim_a proof', 14, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
         if state == SWAP_STATE_COMPLETED:
             if not fee_invoice:
-                actions.append(_action_def('ISSUE_FEE', 'Emitir fee invoice', 30, {'swap_id': swap_id}, risky=False, auto=True))
+                actions.append(_action_def('ISSUE_FEE', 'Issue fee invoice', 30, {'swap_id': swap_id}, risky=False, auto=True))
             elif str(fee_invoice.get('payment_status', 'pending')).lower() != 'paid':
-                actions.append(_action_def('CONFIRMAR_FEE', 'Confirmar pagamento de fee', 40, {'swap_id': swap_id}, risky=True, auto=False))
+                actions.append(_action_def('CONFIRM_FEE', 'Confirm fee payment', 40, {'swap_id': swap_id}, risky=True, auto=False))
 
     actions.sort(key=lambda x: x['priority'])
     return actions
@@ -6038,7 +6038,7 @@ def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) ->
             swap = start_htlc_coordination(client_obj, match_id)
             print(f"[OK] Swap started: {swap.get('swap_id','')} state={swap.get('state','')}")
             return True
-        if code.startswith('ENVIAR_') or code.startswith('REFUND_'):
+        if code.startswith('SEND_') or code.startswith('REFUND_'):
             swap_id = ctx.get('swap_id', '')
             proof_type = ctx.get('proof_type', '')
             if action.get('risky') and input(f"Confirm risky action {proof_type} on swap {swap_id}? (y/n): ").strip().lower() != 'y':
@@ -6053,7 +6053,7 @@ def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) ->
             invoice = issue_fee_invoice(client_obj, swap_id)
             print(f"[FEE] Invoice: {invoice.get('invoice_ref','')} status={invoice.get('payment_status','')}")
             return True
-        if code == 'CONFIRMAR_FEE':
+        if code == 'CONFIRM_FEE':
             swap_id = ctx.get('swap_id', '')
             if input(f"Confirm fee payment for swap {swap_id}? (y/n): ").strip().lower() != 'y':
                 return False
@@ -6109,7 +6109,7 @@ def cli_trade_wizard():
     append_audit_event('cli_action', maker_client_id, intent.get('intent_id', ''), details={'source': 'wizard', 'action': 'CREATE_INTENT'})
     print(f"[OK] Intent created: {intent['intent_id']}")
     if not intent.get('matches_detected'):
-        print('[INFO] No immediate match. Use "Pendencias" ou "Meus Trades".')
+        print('[INFO] No immediate match. Use "Pending Actions" or "My Trades".')
         return
     print(f"[MATCH] Candidates: {', '.join(intent.get('matches_detected', []))}")
     selected_match = intent.get('matches_detected', [])[0]
@@ -6117,12 +6117,12 @@ def cli_trade_wizard():
         chosen = input(f"Select match ID [{selected_match}]: ").strip()
         if chosen:
             selected_match = chosen
-    if input(f"Abrir sessao para match {selected_match}? (y/n): ").strip().lower() != 'y':
+    if input(f"Open session for match {selected_match}? (y/n): ").strip().lower() != 'y':
         return
     opened = open_secure_session(client_obj, selected_match)
     swap = opened.get('swap') or {}
     print(f"[OK] Session opened, swap={swap.get('swap_id','')} state={swap.get('state','')}")
-    if input('Iniciar coordenacao HTLC agora? (y/n): ').strip().lower() == 'y':
+    if input('Start HTLC coordination now? (y/n): ').strip().lower() == 'y':
         swap = start_htlc_coordination(client_obj, selected_match)
     while True:
         swap = get_swap_status(client_obj, swap.get('swap_id', ''))
