@@ -359,6 +359,7 @@ BUFFER_SIZE = 1024 * 1024  # 1MB
 NODE_ID_FILE = 'node_id.txt'
 LOCAL_TEST_MODE = ('--local-test' in sys.argv) or (os.environ.get('ONESEAM_LOCAL_TEST', '').strip().lower() in ('1', 'true', 'yes'))
 CLI_ADMIN_UI_MODE = ('--admin-ui' in sys.argv) or (os.environ.get('ONESEAM_ADMIN_UI', '').strip().lower() in ('1', 'true', 'yes'))
+CLI_ADVANCED_MODE = ('--advanced' in sys.argv) or (os.environ.get('ONESEAM_CLI_ADVANCED', '').strip().lower() in ('1', 'true', 'yes'))
 CLI_MODE_OVERRIDE = (os.environ.get('ONESEAM_CLI_MODE', '').strip().lower() or '')
 if '--mode' in sys.argv:
     try:
@@ -5509,6 +5510,146 @@ def _cli_auto_bind_wallet(client_id: str, wallet: str):
         STORAGE_DB.bind_wallet(client_id, wallet_norm, EVM_CHAIN_ID, status='active')
         print(f'[OTC] Wallet bound: {client_id} -> {wallet_norm}')
 
+def _simple_cli_actor(actor_ctx: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    client_id = str((actor_ctx or {}).get('client_id', '')).strip()
+    if not client_id:
+        raise ValueError('client_id_required')
+    return client_id, _cli_otc_client(client_id)
+
+def _summarize_match_for_client(client_id: str, match_obj: Dict[str, Any]) -> Dict[str, Any]:
+    sell_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_sell_id', '')) or {}
+    buy_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_buy_id', '')) or {}
+    seller_id = sell_intent.get('maker_client_id', '')
+    buyer_id = buy_intent.get('maker_client_id', '')
+    actor_side = 'seller' if client_id == seller_id else 'buyer' if client_id == buyer_id else 'observer'
+    actor_intent = sell_intent if actor_side == 'seller' else buy_intent if actor_side == 'buyer' else {}
+    counterparty_id = buyer_id if actor_side == 'seller' else seller_id if actor_side == 'buyer' else ''
+    suggested_price = round((float(match_obj.get('overlap_min', 0)) + float(match_obj.get('overlap_max', 0))) / 2.0, 8)
+    return {
+        'match_id': match_obj.get('match_id', ''),
+        'status': match_obj.get('status', ''),
+        'you_side': actor_side.upper(),
+        'counterparty_client_id': counterparty_id,
+        'you_sell_asset': actor_intent.get('sell_asset', ''),
+        'you_buy_asset': actor_intent.get('buy_asset', ''),
+        'you_amount': actor_intent.get('amount', 0),
+        'overlap_min': match_obj.get('overlap_min', 0),
+        'overlap_max': match_obj.get('overlap_max', 0),
+        'suggested_price': suggested_price,
+    }
+
+class SimpleCLIAdapter:
+    """
+    Adapter used by oneseam_simple_cli.py.
+    Keeps simplified UX decoupled from core engine internals.
+    """
+    def post_order(self, payload: Dict[str, Any], actor_ctx: Dict[str, Any]) -> Dict[str, Any]:
+        client_id, client_obj = _simple_cli_actor(actor_ctx)
+        maker_wallet = _normalize_wallet(payload.get('maker_wallet', ''))
+        _cli_auto_bind_wallet(client_id, maker_wallet)
+        request_payload = {
+            'maker_wallet': maker_wallet,
+            'sell_asset': _normalize_asset(payload.get('sell_asset', '')),
+            'buy_asset': _normalize_asset(payload.get('buy_asset', '')),
+            'amount': float(payload.get('amount', 0)),
+            'price_min': float(payload.get('price_min', 0)),
+            'price_max': float(payload.get('price_max', 0)),
+            'expiration': int(payload.get('expiration', int(time.time() * 1000) + 900000)),
+            'wallet_nonce': str(payload.get('wallet_nonce', '')).strip(),
+            'metadata': {'cli_source': 'simple_cli', 'operation': 'post_order'}
+        }
+        if WALLET_ATTESTATION_REQUIRED:
+            prepared = prepare_trade_intent_signature(client_obj, request_payload)
+            auto_signature = ''
+            try:
+                auto_signature = _sign_message_with_env_wallet(prepared['message'], maker_wallet)
+            except Exception:
+                auto_signature = ''
+            if auto_signature:
+                request_payload['wallet_signature'] = auto_signature
+                print('[SIGN] wallet_signature applied from ONESEAM_WALLET_PRIVATE_KEY')
+            else:
+                print('[SIGN] Sign this message with your wallet:')
+                print(prepared['message'])
+                request_payload['wallet_signature'] = input('wallet_signature (0x...): ').strip()
+        intent = create_trade_intent(client_obj, request_payload)
+        append_audit_event(
+            'cli_action',
+            client_id,
+            intent.get('intent_id', ''),
+            details={'source': 'simple_cli', 'operation': 'post_order'}
+        )
+        return intent
+
+    def list_matches(self, actor_ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+        client_id, _ = _simple_cli_actor(actor_ctx)
+        out: List[Dict[str, Any]] = []
+        for match_obj in STORAGE_DB.list_matches_for_client(client_id, limit=100):
+            item = _summarize_match_for_client(client_id, match_obj)
+            swap = None
+            for s in _list_swaps_for_client(client_id, limit=200):
+                if s.get('match_id') == match_obj.get('match_id'):
+                    swap = s
+                    break
+            if swap and swap.get('state') in (SWAP_STATE_COMPLETED, SWAP_STATE_REFUNDED, SWAP_STATE_FAILED):
+                item['readiness'] = 'DONE'
+            elif swap:
+                item['readiness'] = 'IN_PROGRESS'
+            else:
+                item['readiness'] = 'READY'
+            out.append(item)
+        return out
+
+    def accept_match_and_start(self, match_id: str, actor_ctx: Dict[str, Any]) -> Dict[str, Any]:
+        client_id, client_obj = _simple_cli_actor(actor_ctx)
+        opened = open_secure_session(client_obj, match_id)
+        swap = start_htlc_coordination(client_obj, match_id)
+        append_audit_event(
+            'cli_action',
+            client_id,
+            match_id,
+            details={'source': 'simple_cli', 'operation': 'accept_match_and_swap'}
+        )
+        return {'match_id': match_id, 'session': opened.get('session', {}), 'swap': swap}
+
+    def list_orders(self, actor_ctx: Dict[str, Any]) -> Dict[str, Any]:
+        client_id, _ = _simple_cli_actor(actor_ctx)
+        intents = STORAGE_DB.list_trade_intents_for_client(client_id, limit=100)
+        matches = STORAGE_DB.list_matches_for_client(client_id, limit=100)
+        swaps = _list_swaps_for_client(client_id, limit=200)
+        invoices = {}
+        for swap in swaps:
+            sid = swap.get('swap_id', '')
+            if sid:
+                invoices[sid] = STORAGE_DB.get_latest_fee_invoice(sid)
+        return {'intents': intents, 'matches': matches, 'swaps': swaps, 'fee_invoices': invoices}
+
+    def compute_next_actions(self, intent: Optional[Dict[str, Any]] = None,
+                             match: Optional[Dict[str, Any]] = None,
+                             session: Optional[Dict[str, Any]] = None,
+                             swap: Optional[Dict[str, Any]] = None,
+                             fee_invoice: Optional[Dict[str, Any]] = None,
+                             actor_ctx: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        client_id = str((actor_ctx or {}).get('client_id', '')).strip()
+        return compute_next_actions(intent=intent, match=match, session=session, swap=swap, fee_invoice=fee_invoice, client_id=client_id)
+
+    def execute_next_action(self, action: Dict[str, Any], actor_ctx: Dict[str, Any], source: str = 'simple_cli') -> bool:
+        client_id, _ = _simple_cli_actor(actor_ctx)
+        return _execute_next_action(client_id, action, source=source)
+
+    def node_status(self):
+        print_status()
+
+def run_simple_cli_menu():
+    try:
+        from oneseam_simple_cli import run_simple_cli
+    except Exception as e:
+        print(f'[CLI] Failed to load simple CLI module, falling back to advanced mode: {e}')
+        cli_menu_advanced()
+        return
+    adapter = SimpleCLIAdapter()
+    run_simple_cli(adapter)
+
 def cli_create_rfq():
     print('\n' + '='*47)
     print('  CREATE RFQ')
@@ -5846,7 +5987,7 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
         if status == INTENT_STATUS_OPEN:
             actions.append(_action_def(
                 'VIEW_INTENT_STATUS',
-                'Monitorar intent aberta',
+                'Monitor open intent',
                 90,
                 {'intent_id': intent.get('intent_id', '')},
                 risky=False,
@@ -6000,7 +6141,7 @@ def _submit_htlc_proof_interactive(client_id: str, swap_id: str, proof_type: str
         'secret': secret,
         'signer_wallet': signer_wallet or None,
         'wallet_nonce': wallet_nonce,
-        'metadata': {'cli_source': source}
+        'metadata': {'cli_source': source, 'operation': proof_type}
     }
     if PROOF_WALLET_ATTESTATION_REQUIRED:
         swap_obj = get_swap_status(client_obj, swap_id)
@@ -6018,7 +6159,7 @@ def _submit_htlc_proof_interactive(client_id: str, swap_id: str, proof_type: str
             print('[SIGN] Sign this HTLC proof message with your wallet:')
             print(prepared['message'])
             payload['wallet_signature'] = input('wallet_signature (0x...): ').strip()
-    append_audit_event('cli_action', client_id, swap_id, details={'source': source, 'action': proof_type})
+    append_audit_event('cli_action', client_id, swap_id, details={'cli_source': source, 'operation': proof_type})
     return submit_htlc_proof(client_obj, swap_id, payload)
 
 def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) -> bool:
@@ -6028,13 +6169,13 @@ def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) ->
     try:
         if code == 'OPEN_SESSION':
             match_id = ctx.get('match_id', '')
-            append_audit_event('cli_action', client_id, match_id, details={'source': source, 'action': code})
+            append_audit_event('cli_action', client_id, match_id, details={'cli_source': source, 'operation': code})
             open_secure_session(client_obj, match_id)
             print(f"[OK] Session opened for match {match_id}")
             return True
         if code == 'START_SWAP':
             match_id = ctx.get('match_id', '')
-            append_audit_event('cli_action', client_id, match_id, details={'source': source, 'action': code})
+            append_audit_event('cli_action', client_id, match_id, details={'cli_source': source, 'operation': code})
             swap = start_htlc_coordination(client_obj, match_id)
             print(f"[OK] Swap started: {swap.get('swap_id','')} state={swap.get('state','')}")
             return True
@@ -6049,7 +6190,7 @@ def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) ->
             return True
         if code == 'ISSUE_FEE':
             swap_id = ctx.get('swap_id', '')
-            append_audit_event('cli_action', client_id, swap_id, details={'source': source, 'action': code})
+            append_audit_event('cli_action', client_id, swap_id, details={'cli_source': source, 'operation': code})
             invoice = issue_fee_invoice(client_obj, swap_id)
             print(f"[FEE] Invoice: {invoice.get('invoice_ref','')} status={invoice.get('payment_status','')}")
             return True
@@ -6058,7 +6199,7 @@ def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) ->
             if input(f"Confirm fee payment for swap {swap_id}? (y/n): ").strip().lower() != 'y':
                 return False
             payment_ref = input('Payment reference: ').strip()
-            append_audit_event('cli_action', client_id, swap_id, details={'source': source, 'action': code})
+            append_audit_event('cli_action', client_id, swap_id, details={'cli_source': source, 'operation': code})
             invoice = confirm_fee_payment(client_obj, swap_id, payment_ref)
             print(f"[FEE] Status: {invoice.get('payment_status','')}")
             return True
@@ -6411,8 +6552,8 @@ def cli_menu_legacy_otc():
         except Exception as e:
             print(f'[X] Operation failed: {e}')
 
-def cli_menu():
-    """Operator-focused CLI menu (production desk flow)."""
+def cli_menu_advanced():
+    """Advanced/manual CLI menu (technical operators and debugging)."""
     if not DARKPOOL_ENABLED:
         print('[INFO] darkpool_enabled=false, switching to legacy OTC menu.')
         cli_menu_legacy_otc()
@@ -6420,12 +6561,15 @@ def cli_menu():
     show_admin = CLI_ADMIN_UI_MODE or (CLI_MODE_OVERRIDE == 'admin')
     while True:
         print('\n' + '=' * 47)
-        print('  ONESEAM DESK FLOW')
+        print('  ONESEAM ADVANCED CLI')
         print('=' * 47)
         print('  1. Node Status')
         print('  2. Commit Trade Intent (for matching)')
         print('  3. Accept Trade (from match)')
-        print('  4. Exit')
+        print('  4. Pending Actions')
+        print('  5. My Trades')
+        print('  6. Guided Wizard')
+        print('  7. Exit')
         if show_admin:
             print('  9. Admin/Technical')
         choice = input('\nSelect option: ').strip()
@@ -6437,6 +6581,12 @@ def cli_menu():
             elif choice == '3':
                 cli_accept_trade_from_match()
             elif choice == '4':
+                cli_pending_actions()
+            elif choice == '5':
+                cli_my_trades()
+            elif choice == '6':
+                cli_trade_wizard()
+            elif choice == '7':
                 print('\n[SHUTDOWN] Stopping node...')
                 local_test_registry_cleanup()
                 raise SystemExit(0)
@@ -6453,6 +6603,22 @@ def cli_menu():
                 print('[!] Invalid option.')
         except Exception as e:
             print(f'[X] Operation failed: {e}')
+
+def _cli_use_advanced_mode() -> bool:
+    if CLI_ADVANCED_MODE:
+        return True
+    if CLI_MODE_OVERRIDE in ('advanced', 'admin'):
+        return True
+    if CLI_MODE_OVERRIDE in ('simple', 'trader'):
+        return False
+    return False
+
+def cli_menu():
+    """Default CLI entrypoint: simplified CLI unless advanced mode is requested."""
+    if _cli_use_advanced_mode():
+        cli_menu_advanced()
+        return
+    run_simple_cli_menu()
 
 # ===== ENTERPRISE REST API =====
 async def start_rest_api():
@@ -7340,7 +7506,8 @@ if __name__ == '__main__':
         else:
             print('[MODE] Starting in CLI mode')
             print('[INFO] For API mode, run: python oneseam.py api')
-            print('[INFO] For admin UI, run: python oneseam.py --admin-ui')
+            print('[INFO] For advanced CLI, run: python oneseam.py --advanced')
+            print('[INFO] For advanced admin UI, run: python oneseam.py --advanced --admin-ui')
             await asyncio.to_thread(cli_menu)
 
     try:

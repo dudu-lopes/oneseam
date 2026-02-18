@@ -31,14 +31,19 @@ CLI:
 python oneseam.py
 ```
 
+Advanced CLI:
+```bash
+python oneseam.py --advanced
+```
+
 API:
 ```bash
 python oneseam.py api
 ```
 
-Admin/Technical UI (hidden by default):
+Advanced Admin/Technical UI:
 ```bash
-python oneseam.py --admin-ui
+python oneseam.py --advanced --admin-ui
 ```
 
 ## Wallet UX (CLI)
@@ -50,14 +55,21 @@ export ONESEAM_WALLET_PRIVATE_KEY=0x...
 
 If the action wallet matches the environment key, the signature is applied automatically.
 
-## Trader Flow (Condensed CLI)
-Operator main menu:
-- `1. Node Status`
-- `2. Commit Trade Intent (for matching)`
-- `3. Accept Trade (from match)`
-- `4. Exit`
+## Trader Flow (Simple Default CLI)
+Default menu:
+- `1. Post Order`
+- `2. Check Matches`
+- `3. Accept Match & Swap`
+- `4. My Orders`
+- `5. Help`
+- `6. Exit`
 
-Technical functions are kept outside the primary flow (admin mode).
+Quick command:
+- `0. Node Status`
+
+Notes:
+- Default mode is simplified for operators.
+- Advanced/manual controls remain available via `--advanced`.
 
 ## API v2 (DarkPool)
 - `POST /v2/intents/prepare-signature`
