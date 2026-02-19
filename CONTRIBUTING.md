@@ -13,18 +13,16 @@ Changes that introduce custody behavior are out of scope.
 python -m venv .venv
 . .venv/Scripts/activate
 pip install -r requirements.txt
-pip install -r requirements-dev.txt
 ```
 
 ## Local Validation
 ```bash
-python -m pytest
-python -m ruff check .
+python -m py_compile oneseam.py oneseam_simple_cli.py oneseam_blind_matching.py
 ```
 
 ## Pull Request Rules
 - Keep changes small and focused.
-- Include tests for behavior changes.
+- Include clear reproduction/validation steps for behavior changes.
 - Update `README.md` and `oneseam_config.yaml` examples when config/API changes.
 - Never commit private keys, secrets, or real production certificates.
 - Follow `CODE_OF_CONDUCT.md`.

@@ -51,7 +51,6 @@ python oneseam.py api
 - Installation: `docs/INSTALLATION.md`
 - API reference: `docs/API.md`
 - Security policy: `docs/SECURITY.md`
-- Production checklist: `docs/PRODUCTION_FILES.md`
 
 ## Core Repository Layout
 - `oneseam.py`
