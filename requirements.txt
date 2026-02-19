@@ -1,4 +1,4 @@
-# Copyright (c) 2026 ONESEAM Contributors.
+# Copyright (c) 2026 Eduardo de Figueiredo.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 cryptography>=41.0.0

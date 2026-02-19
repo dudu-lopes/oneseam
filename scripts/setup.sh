@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env bash
-# Copyright (c) 2026 ONESEAM Contributors.
+# Copyright (c) 2026 Eduardo de Figueiredo.
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 set -euo pipefail
