@@ -1,4 +1,6 @@
-﻿# Code of Conduct
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# Code of Conduct
 
 ## Our Commitment
 We are committed to a professional, respectful, and inclusive community focused on high-quality engineering work.

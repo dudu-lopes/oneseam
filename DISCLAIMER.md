@@ -1,4 +1,6 @@
-﻿# DISCLAIMER
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# DISCLAIMER
 
 ONESEAM is open-source software for non-custodial coordination of peer-to-peer trading workflows.
 

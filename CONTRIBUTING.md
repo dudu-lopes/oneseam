@@ -1,3 +1,5 @@
+<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
 # Contributing to ONESEAM
 
 ## Scope

@@ -1,4 +1,7 @@
-﻿from pathlib import Path
+# Copyright (c) 2026 ONESEAM Contributors.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+from pathlib import Path
 
 from setuptools import setup
 

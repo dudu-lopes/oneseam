@@ -1,4 +1,7 @@
-﻿"""Simple API usage example for ONESEAM v2.
+# Copyright (c) 2026 ONESEAM Contributors.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+"""Simple API usage example for ONESEAM v2.
 
 This script demonstrates:
 1) preparing intent signature payload

@@ -1,4 +1,6 @@
-﻿# ONESEAM Dark Pool
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# ONESEAM Dark Pool
 
 ONESEAM is a non-custodial P2P coordination network for:
 - private order discovery

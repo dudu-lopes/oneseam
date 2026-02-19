@@ -1,3 +1,6 @@
+# Copyright (c) 2026 ONESEAM Contributors.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 cryptography>=41.0.0
 pycryptodome>=3.19.0
 pyyaml>=6.0.0

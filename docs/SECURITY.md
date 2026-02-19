@@ -1,4 +1,6 @@
-﻿# Security Policy
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# Security Policy
 
 ## Supported Scope
 Security reports are accepted for:

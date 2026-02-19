@@ -1,4 +1,6 @@
-﻿# API (v2)
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# API (v2)
 
 Base path: `/v2`
 

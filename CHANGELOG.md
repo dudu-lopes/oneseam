@@ -1,4 +1,6 @@
-﻿# Changelog
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# Changelog
 
 All notable changes to this project are documented in this file.
 

@@ -1,4 +1,6 @@
-﻿# Examples
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# Examples
 
 This folder contains runnable snippets for local integration experiments.
 

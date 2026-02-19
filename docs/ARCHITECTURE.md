@@ -1,4 +1,6 @@
-﻿# Architecture
+﻿<!-- Copyright (c) 2026 ONESEAM Contributors. SPDX-License-Identifier: AGPL-3.0-or-later -->
+
+# Architecture
 
 ## Goal
 ONESEAM provides a non-custodial dark-pool style coordination layer for private P2P OTC trading.

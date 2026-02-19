@@ -1,3 +1,6 @@
+# Copyright (c) 2026 ONESEAM Contributors.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """
 ONESEAM - DarkPool P2P Non-Custodial Trading Coordination
 Version: 3.2.0
