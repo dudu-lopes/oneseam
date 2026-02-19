@@ -4,6 +4,8 @@ __pycache__/
 
 # Virtual environment
 .venv/
+.pytest_cache/
+.ruff_cache/
 
 # Local data and storage
 oneseam_storage/
@@ -31,10 +33,10 @@ Thumbs.db
 
 # Logs
 *.log
+.env
 
 # Local secrets / keys
 shard_signing_priv.pem
-shard_signing_pub.pem
 oneseam_keys.json
 
 # Production secrets/certs (keep only placeholders in repo)

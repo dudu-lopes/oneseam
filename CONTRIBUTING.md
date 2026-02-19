@@ -27,6 +27,8 @@ python -m ruff check .
 - Include tests for behavior changes.
 - Update `README.md` and `oneseam_config.yaml` examples when config/API changes.
 - Never commit private keys, secrets, or real production certificates.
+- Follow `CODE_OF_CONDUCT.md`.
+- For vulnerabilities, follow `docs/SECURITY.md`.
 
 ## Commit Message Style
 Use concise prefixes:
@@ -35,4 +37,3 @@ Use concise prefixes:
 - `chore:`
 - `docs:`
 - `test:`
-
