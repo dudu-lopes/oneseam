@@ -126,3 +126,17 @@ Short summary:
 ## License
 ONESEAM is open-source software released under the GNU AGPL-3.0 license.
 See `LICENSE` for the full text.
+
+## Repository Standards
+- CI: `.github/workflows/ci.yml`
+- contribution guide: `CONTRIBUTING.md`
+- security policy: `SECURITY.md`
+- dev dependencies: `requirements-dev.txt`
+
+## Development Quality Gates
+```bash
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
+python -m ruff check --select F821,F822,F823 oneseam.py oneseam_simple_cli.py oneseam_blind_matching.py tests
+python -m pytest tests/test_simple_cli_dispatch.py tests/test_simple_cli_module.py
+```
