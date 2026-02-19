@@ -122,3 +122,7 @@ Short summary:
 - required in repo: code + config + scripts + docs
 - required in environment: real certs, JWT public keys, verifier/BTC RPC secrets
 - never version production private keys and tokens
+
+## License
+ONESEAM is open-source software released under the GNU AGPL-3.0 license.
+See `LICENSE` for the full text.
