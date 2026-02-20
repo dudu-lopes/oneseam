@@ -19,7 +19,7 @@ It depends on an adapter object provided by oneseam.py.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 def _ask_non_empty(prompt: str) -> str:
@@ -34,31 +34,30 @@ def _ask_float(prompt: str) -> float:
     while True:
         raw = input(prompt).strip()
         try:
-            value = float(raw)
-            return value
-        except Exception:
+            return float(raw)
+        except ValueError:
             print('[!] Invalid number.')
 
 
-def _ask_int(prompt: str, default: Optional[int] = None) -> int:
+def _ask_int(prompt: str, default: int | None = None) -> int:
     while True:
         raw = input(prompt).strip()
         if not raw and default is not None:
             return int(default)
         try:
             return int(raw)
-        except Exception:
+        except ValueError:
             print('[!] Invalid integer.')
 
 
-def _find_match_by_id(matches: List[Dict[str, Any]], match_id: str) -> Optional[Dict[str, Any]]:
-    for item in matches:
-        if item.get('match_id') == match_id:
+def _find_item_by_id(items: list[dict[str, Any]], field_name: str, field_value: str) -> dict[str, Any] | None:
+    for item in items:
+        if item.get(field_name) == field_value:
             return item
     return None
 
 
-def _status_banner(adapter: Any):
+def _status_banner() -> None:
     print('\n' + '=' * 58)
     print('  ONESEAM SIMPLE CLI')
     print('=' * 58)
@@ -70,7 +69,6 @@ def _status_banner(adapter: Any):
     print('  5. Help')
     print('  6. Exit')
     print('=' * 58)
-    _ = adapter  # reserved for future status summaries
 
 
 def _select_expiry_ms() -> int:
@@ -154,19 +152,17 @@ def _check_matches_flow(adapter: Any):
         print(f"      Readiness: {item.get('readiness','')}")
 
 
-def _guided_swap_loop(adapter: Any, actor_ctx: Dict[str, Any], match_id: str, swap_id: str, session: Optional[Dict[str, Any]] = None):
+def _guided_swap_loop(
+    adapter: Any,
+    actor_ctx: dict[str, Any],
+    match_id: str,
+    swap_id: str,
+    session: dict[str, Any] | None = None,
+) -> None:
     while True:
         orders = adapter.list_orders(actor_ctx)
-        match = None
-        for item in orders.get('matches', []):
-            if item.get('match_id') == match_id:
-                match = item
-                break
-        swap = None
-        for item in orders.get('swaps', []):
-            if item.get('swap_id') == swap_id:
-                swap = item
-                break
+        match = _find_item_by_id(orders.get('matches', []), 'match_id', match_id)
+        swap = _find_item_by_id(orders.get('swaps', []), 'swap_id', swap_id)
         if not swap:
             print('[INFO] Swap no longer available.')
             return
@@ -209,7 +205,7 @@ def _guided_swap_loop(adapter: Any, actor_ctx: Dict[str, Any], match_id: str, sw
             return
         try:
             selected = actions[int(chosen) - 1]
-        except Exception:
+        except (ValueError, IndexError):
             print('[!] Invalid option.')
             continue
         adapter.execute_next_action(selected, actor_ctx, source='simple_cli')
@@ -307,30 +303,29 @@ def run_simple_cli(adapter: Any):
     Adapter methods are resolved from oneseam.py.
     """
     while True:
-        _status_banner(adapter)
+        _status_banner()
         choice = input('Select option: ').strip()
+        handlers = {
+            '0': adapter.node_status,
+            '1': lambda: _post_order_flow(adapter),
+            '2': lambda: _check_matches_flow(adapter),
+            '3': lambda: _accept_match_and_swap_flow(adapter),
+            '4': lambda: _my_orders_flow(adapter),
+            '5': _help_flow,
+        }
         try:
-            if choice == '0':
-                adapter.node_status()
-            elif choice == '1':
-                _post_order_flow(adapter)
-            elif choice == '2':
-                _check_matches_flow(adapter)
-            elif choice == '3':
-                _accept_match_and_swap_flow(adapter)
-            elif choice == '4':
-                _my_orders_flow(adapter)
-            elif choice == '5':
-                _help_flow()
-            elif choice == '6':
+            if choice == '6':
                 print('[SHUTDOWN] Stopping node...')
                 raise SystemExit(0)
-            else:
+            handler = handlers.get(choice)
+            if handler is None:
                 print('[!] Invalid option.')
+                continue
+            handler()
         except KeyboardInterrupt:
             print('\n[SHUTDOWN] Interrupted by user.')
             raise SystemExit(0)
         except SystemExit:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - CLI boundary should never crash on adapter/runtime errors.
             print(f'[X] Operation failed: {e}')

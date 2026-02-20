@@ -62,7 +62,7 @@ def main() -> None:
             print("\nintent status:\n", json.dumps(status, indent=2))
     except urllib.error.HTTPError as exc:
         print("HTTP error:", exc.code, exc.read().decode("utf-8", errors="ignore"))
-    except Exception as exc:
+    except urllib.error.URLError as exc:
         print("Error:", str(exc))
 
 

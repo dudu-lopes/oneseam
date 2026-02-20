@@ -273,8 +273,7 @@ def encrypt_payload_aes256(data: str, password: str) -> str:
     ciphertext = aesgcm.encrypt(nonce, data.encode(), None)
     
     # Return: salt + nonce + ciphertext (need salt+nonce for decryption)
-    combined = base64.b64encode(salt + nonce + ciphertext).decode()
-    return combined
+    return base64.b64encode(salt + nonce + ciphertext).decode()
 
 def decrypt_payload_aes256(data: str, password: str) -> str:
     """Decrypt AES-256-GCM"""
@@ -304,9 +303,9 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'oneseam_
 if os.path.exists(CONFIG_PATH):
     try:
         import yaml
-        with open(CONFIG_PATH, 'r') as f:
+        with open(CONFIG_PATH) as f:
             CONFIG = yaml.safe_load(f) or {}
-    except Exception:
+    except (ImportError, OSError, AttributeError, ValueError):
         pass
 
 def _config(key: str, default: Any) -> Any:
@@ -369,7 +368,7 @@ if '--mode' in sys.argv:
         mode_index = sys.argv.index('--mode')
         if mode_index + 1 < len(sys.argv):
             CLI_MODE_OVERRIDE = str(sys.argv[mode_index + 1]).strip().lower()
-    except Exception:
+    except ValueError:
         pass
 LOCAL_TEST_PORT_SCAN_SIZE = int(_config('local_test_port_scan_size', 20))
 LOCAL_TEST_DISCOVERY_INTERVAL = float(_config('local_test_discovery_interval', 2.0))
@@ -533,7 +532,7 @@ def run_async(coro):
         if loop and loop.is_running():
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
             return fut.result()
-    except Exception:
+    except RuntimeError:
         pass
     return asyncio.run(coro)
 
@@ -550,7 +549,7 @@ def _load_api_keys() -> Dict[str, Dict[str, str]]:
         env_keys = json.loads(env_raw)
         if isinstance(env_keys, dict):
             return env_keys
-    except Exception:
+    except json.JSONDecodeError:
         print("[API] Invalid ONESEAM_API_KEYS_JSON; expected JSON object.")
     return {}
 
@@ -2060,10 +2059,10 @@ class LocalKeyProvider(KeyProvider):
             return self._cache
         if os.path.exists(self.path):
             try:
-                with open(self.path, 'r') as f:
+                with open(self.path) as f:
                     self._cache = json.load(f)
                     return self._cache
-            except Exception:
+            except (OSError, json.JSONDecodeError, TypeError):
                 pass
         self._cache = {}
         return self._cache
@@ -2073,7 +2072,7 @@ class LocalKeyProvider(KeyProvider):
             json.dump(data, f, indent=2)
         try:
             os.chmod(self.path, 0o600)
-        except Exception:
+        except OSError:
             pass
     
     def get_key(self, key_id: str) -> Tuple[bytes, int]:
@@ -2144,10 +2143,9 @@ def _load_or_create_shard_signing_keys() -> Tuple[ed25519.Ed25519PrivateKey, byt
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    if SHARD_SIGNING_PUBLIC_KEY:
-        if not os.path.exists(SHARD_SIGNING_PUBLIC_KEY):
-            with open(SHARD_SIGNING_PUBLIC_KEY, 'wb') as f:
-                f.write(pub_bytes)
+    if SHARD_SIGNING_PUBLIC_KEY and not os.path.exists(SHARD_SIGNING_PUBLIC_KEY):
+        with open(SHARD_SIGNING_PUBLIC_KEY, 'wb') as f:
+            f.write(pub_bytes)
     return priv, pub_bytes
 
 def get_node_signing_public() -> str:
@@ -2185,9 +2183,9 @@ def _load_jwt_public_keys() -> List[str]:
             continue
         if isinstance(item, str) and os.path.exists(item):
             try:
-                with open(item, 'r') as f:
+                with open(item) as f:
                     keys.append(f.read())
-            except Exception:
+            except OSError:
                 continue
     return keys
 

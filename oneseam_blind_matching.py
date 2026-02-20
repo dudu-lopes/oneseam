@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
 DEFAULT_GLOBAL_SALT = "ONESEAM_BLIND_MATCHING_V1_PRICE_SLOTS"
@@ -23,7 +23,7 @@ def _hash_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def canonical_pair(asset_a: str, asset_b: str) -> Tuple[str, str]:
+def canonical_pair(asset_a: str, asset_b: str) -> tuple[str, str]:
     a = str(asset_a or "").strip().upper()
     b = str(asset_b or "").strip().upper()
     if not a or not b or a == b:
@@ -44,7 +44,7 @@ def _normalize_price_range_to_canonical(
     buy_asset: str,
     price_min: float,
     price_max: float,
-) -> Tuple[float, float, str, str]:
+) -> tuple[float, float, str, str]:
     """
     Normalize to canonical quote/base units for deterministic token generation.
 
@@ -68,7 +68,7 @@ def _normalize_price_range_to_canonical(
     raise ValueError("invalid_pair_direction")
 
 
-def _bucket_range(min_value: float, max_value: float, step: float) -> Tuple[int, int]:
+def _bucket_range(min_value: float, max_value: float, step: float) -> tuple[int, int]:
     if step <= 0:
         raise ValueError("invalid_slot_size")
     left = int(math.floor(min_value / step))
@@ -81,13 +81,13 @@ def _slot_token(slot_id: str, pair_hash: str, global_salt: str) -> str:
 
 
 def build_blind_commitment_meta(
-    intent: Dict[str, Any],
+    intent: dict[str, Any],
     *,
     slot_size: float,
     amount_bucket_size: float,
     global_salt: str = DEFAULT_GLOBAL_SALT,
     max_slots: int = 4096,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     sell_asset = str(intent.get("sell_asset", "")).strip().upper()
     buy_asset = str(intent.get("buy_asset", "")).strip().upper()
     amount = _to_positive_float(intent.get("amount", 0.0), "amount_must_be_positive")
@@ -109,7 +109,7 @@ def build_blind_commitment_meta(
     if slot_count > int(max_slots):
         raise ValueError("blind_slot_range_too_wide")
 
-    slot_tokens: List[str] = []
+    slot_tokens: list[str] = []
     for slot_id in range(slot_min, slot_max + 1):
         slot_tokens.append(_slot_token(f"S{slot_id}", pair_hash, global_salt))
 
@@ -132,7 +132,7 @@ def build_blind_commitment_meta(
     }
 
 
-def blind_overlap_tokens(meta_a: Dict[str, Any], meta_b: Dict[str, Any]) -> Optional[List[str]]:
+def blind_overlap_tokens(meta_a: dict[str, Any], meta_b: dict[str, Any]) -> list[str] | None:
     """
     Returns:
       - None if blind metadata is missing/incomplete
@@ -155,11 +155,10 @@ def blind_overlap_tokens(meta_a: Dict[str, Any], meta_b: Dict[str, Any]) -> Opti
         return []
     if a_side_hash == b_side_hash:
         return []
-    overlap = sorted(set(str(x) for x in a_tokens) & set(str(x) for x in b_tokens))
-    return overlap
+    return sorted({str(x) for x in a_tokens} & {str(x) for x in b_tokens})
 
 
-def build_public_blind_commitment(intent: Dict[str, Any], commitment_meta: Dict[str, Any]) -> Dict[str, Any]:
+def build_public_blind_commitment(intent: dict[str, Any], commitment_meta: dict[str, Any]) -> dict[str, Any]:
     """
     Build a minimal public commitment payload for network distribution.
     """
