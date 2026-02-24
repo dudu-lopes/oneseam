@@ -63,11 +63,8 @@ def _status_banner() -> None:
     print('=' * 58)
     print('  0. Node Status')
     print('  1. Post Order')
-    print('  2. Check Matches')
-    print('  3. Accept Match & Swap')
-    print('  4. My Orders')
-    print('  5. Help')
-    print('  6. Exit')
+    print('  2. My Orders')
+    print('  3. Exit')
     print('=' * 58)
 
 
@@ -127,9 +124,9 @@ def _post_order_flow(adapter: Any):
     matches = intent.get('matches_detected') or []
     if matches:
         print(f"Matches detected: {', '.join(matches)}")
-        print("Tip: run '3. Accept Match & Swap'.")
+        print("Tip: run '2. My Orders' to review and confirm matches.")
     else:
-        print("No immediate match. Use '2. Check Matches'.")
+        print("No immediate match. Monitor in '2. My Orders'.")
 
 
 def _check_matches_flow(adapter: Any):
@@ -264,15 +261,46 @@ def _my_orders_flow(adapter: Any):
     matches = orders.get('matches') or []
     swaps = orders.get('swaps') or []
     fee_invoices = orders.get('fee_invoices') or {}
-    print(f"Intents: {len(intents)} | Matches: {len(matches)} | Swaps: {len(swaps)}")
-    for item in intents[:20]:
+    terminal_intent_statuses = {'CANCELLED', 'EXPIRED', 'SETTLED', 'COMPLETED'}
+    active_intents = [x for x in intents if str(x.get('status', '')).upper() not in terminal_intent_statuses]
+    print(f"Active orders: {len(active_intents)} | Matches: {len(matches)} | Swaps: {len(swaps)}")
+    for item in active_intents[:20]:
         print(f"  - intent {item.get('intent_id','')} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
-    for item in matches[:20]:
-        print(f"  - match {item.get('match_id','')} | status={item.get('status','')}")
+    print('\nMatches:')
+    for idx, item in enumerate(matches[:20], start=1):
+        print(f"  [{idx}] {item.get('match_id','')} | readiness={item.get('readiness','')} | status={item.get('status','')}")
+        print(f"      You: {item.get('you_sell_asset','')} -> {item.get('you_buy_asset','')} | amount={item.get('you_amount','')}")
+        print(f"      Price overlap: {item.get('overlap_min','')} - {item.get('overlap_max','')}")
+    print('\nSwaps:')
     for item in swaps[:20]:
         invoice = fee_invoices.get(item.get('swap_id', ''), None)
         invoice_status = (invoice or {}).get('payment_status', 'none')
         print(f"  - swap {item.get('swap_id','')} | state={item.get('state','')} | fee={invoice_status}")
+
+    if matches:
+        confirm_match = input('Confirm and start a match now? (y/n): ').strip().lower()
+        if confirm_match == 'y':
+            raw = input('Select match number or enter match_id: ').strip()
+            selected_match_id = ''
+            if raw.isdigit():
+                pick = int(raw)
+                if 1 <= pick <= len(matches):
+                    selected_match_id = matches[pick - 1].get('match_id', '')
+            else:
+                selected_match_id = raw
+            if selected_match_id:
+                result = adapter.accept_match_and_start(selected_match_id, actor_ctx)
+                session = result.get('session') or {}
+                swap = result.get('swap') or {}
+                swap_id = swap.get('swap_id', '')
+                print(f"[OK] Match confirmed: {selected_match_id}")
+                print(f"Session ID: {session.get('session_id','')}")
+                print(f"Swap ID: {swap_id}")
+                if swap_id:
+                    _guided_swap_loop(adapter, actor_ctx, selected_match_id, swap_id, session=session)
+                return
+            print('[!] Invalid match selection.')
+
     open_swap = input('Open a swap for guided actions (swap_id, optional): ').strip()
     if not open_swap:
         return
@@ -308,13 +336,10 @@ def run_simple_cli(adapter: Any):
         handlers = {
             '0': adapter.node_status,
             '1': lambda: _post_order_flow(adapter),
-            '2': lambda: _check_matches_flow(adapter),
-            '3': lambda: _accept_match_and_swap_flow(adapter),
-            '4': lambda: _my_orders_flow(adapter),
-            '5': _help_flow,
+            '2': lambda: _my_orders_flow(adapter),
         }
         try:
-            if choice == '6':
+            if choice == '3':
                 print('[SHUTDOWN] Stopping node...')
                 raise SystemExit(0)
             handler = handlers.get(choice)

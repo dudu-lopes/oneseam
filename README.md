@@ -27,11 +27,8 @@ python oneseam.py api
 
 ## Simplified Trader CLI (default)
 - `1. Post Order`
-- `2. Check Matches`
-- `3. Accept Match & Swap`
-- `4. My Orders`
-- `5. Help`
-- `6. Exit`
+- `2. My Orders` (active orders + match notifications + match confirmation)
+- `3. Exit`
 - `0. Node Status`
 
 ## API v2
