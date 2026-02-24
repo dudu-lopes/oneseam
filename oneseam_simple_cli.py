@@ -59,7 +59,7 @@ def _find_item_by_id(items: list[dict[str, Any]], field_name: str, field_value: 
 
 def _status_banner() -> None:
     print('\n' + '=' * 58)
-    print('  ONESEAM SIMPLE CLI')
+    print('  ONESEAM MENU')
     print('=' * 58)
     print('  0. Node Status')
     print('  1. Post Order')
