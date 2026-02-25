@@ -93,6 +93,8 @@ def _post_order_flow(adapter: Any):
     print('-' * 58)
 
     client_id = _ask_non_empty('Client ID (your ONESEAM user name): ')
+    print('Wallet address = your public wallet address (example: 0x...).')
+    print('Use an address you control. You will sign actions with this wallet.')
     wallet = _ask_non_empty('Wallet address: ')
 
     print('\nOrder side:')
