@@ -19,13 +19,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
+MAX_LIST_ITEMS = 8
+
 
 def _ask_non_empty(prompt: str) -> str:
     while True:
         value = input(prompt).strip()
         if value:
             return value
-        print('[!] Value is required.')
+        print('Value is required.')
 
 
 def _ask_float(prompt: str) -> float:
@@ -34,7 +36,7 @@ def _ask_float(prompt: str) -> float:
         try:
             return float(raw)
         except ValueError:
-            print('[!] Invalid number.')
+            print('Invalid number.')
 
 
 def _ask_int(prompt: str, default: int | None = None) -> int:
@@ -45,7 +47,7 @@ def _ask_int(prompt: str, default: int | None = None) -> int:
         try:
             return int(raw)
         except ValueError:
-            print('[!] Invalid integer.')
+            print('Invalid integer.')
 
 
 def _find_item_by_id(items: list[dict[str, Any]], field_name: str, field_value: str) -> dict[str, Any] | None:
@@ -55,16 +57,20 @@ def _find_item_by_id(items: list[dict[str, Any]], field_name: str, field_value: 
     return None
 
 
+def _short_id(value: str, max_len: int = 20) -> str:
+    text = str(value or '').strip()
+    if len(text) <= max_len:
+        return text
+    return f"{text[:10]}...{text[-6:]}"
+
+
 def _status_banner() -> None:
-    print('\n' + '=' * 58)
-    print('  ONESEAM MENU')
-    print('=' * 58)
-    print('  0. Node Status')
-    print('  1. Post Order')
-    print('  2. My Orders  (active orders + match alerts)')
-    print('  3. Exit')
-    print('=' * 58)
-    print('Tip: if a match appears, confirm it in "My Orders".')
+    print('\nONESEAM MENU')
+    print('0. Node Status')
+    print('1. Post Order')
+    print('2. My Orders')
+    print('3. Exit')
+    print('Tip: confirm matches in "My Orders".')
 
 
 def _select_expiry_ms() -> int:
@@ -78,9 +84,7 @@ def _select_expiry_ms() -> int:
 
 
 def _post_order_flow(adapter: Any):
-    print('\n' + '-' * 58)
-    print('POST ORDER')
-    print('-' * 58)
+    print('\nPost Order')
 
     client_id = _ask_non_empty('Client ID: ')
     wallet = _ask_non_empty('Wallet address: ')
@@ -118,11 +122,12 @@ def _post_order_flow(adapter: Any):
     actor_ctx = {'client_id': client_id}
     intent = adapter.post_order(payload, actor_ctx)
 
-    print('\n[OK] Order posted.')
-    print(f"Order ID: {intent.get('intent_id', '')}")
+    print('\nOrder posted.')
+    print(f"Order ID: {_short_id(intent.get('intent_id', ''))}")
     matches = intent.get('matches_detected') or []
     if matches:
-        print(f"Matches detected: {', '.join(matches)}")
+        pretty = ', '.join(_short_id(x) for x in matches[:MAX_LIST_ITEMS])
+        print(f"Matches found: {pretty}")
         print("Next step: open '2. My Orders' and confirm the match.")
     else:
         print("No match yet. Keep monitoring in '2. My Orders'.")
@@ -154,11 +159,11 @@ def _guided_swap_loop(
         match = _find_item_by_id(orders.get('matches', []), 'match_id', match_id)
         swap = _find_item_by_id(orders.get('swaps', []), 'swap_id', swap_id)
         if not swap:
-            print('[INFO] Swap no longer available.')
+            print('Swap not available anymore.')
             return
         fee_invoice = (orders.get('fee_invoices') or {}).get(swap_id)
 
-        print('\n' + '-' * 58)
+        print('\nSwap')
         state = str(swap.get('state', ''))
         print(f"Swap status: {state}")
         print(_swap_state_hint(state))
@@ -174,7 +179,7 @@ def _guided_swap_loop(
             actor_ctx=actor_ctx
         )
         if not actions:
-            print('[OK] No pending actions.')
+            print('No pending actions.')
             return
 
         recommended = actions[0]
@@ -196,15 +201,13 @@ def _guided_swap_loop(
         try:
             selected = actions[int(chosen) - 1]
         except (ValueError, IndexError):
-            print('[!] Invalid option.')
+            print('Invalid option.')
             continue
         adapter.execute_next_action(selected, actor_ctx, source='simple_cli')
 
 
 def _my_orders_flow(adapter: Any):
-    print('\n' + '-' * 58)
-    print('MY ORDERS')
-    print('-' * 58)
+    print('\nMy Orders')
     client_id = _ask_non_empty('Client ID: ')
     actor_ctx = {'client_id': client_id}
     orders = adapter.list_orders(actor_ctx)
@@ -218,22 +221,22 @@ def _my_orders_flow(adapter: Any):
     print('\nOpen orders:')
     if not active_intents:
         print('  none')
-    for item in active_intents[:10]:
-        print(f"  - {item.get('intent_id','')} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
+    for item in active_intents[:MAX_LIST_ITEMS]:
+        print(f"  - {_short_id(item.get('intent_id',''))} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
 
     print('\nMatches found:')
     if not matches:
         print('  none')
-    for idx, item in enumerate(matches[:10], start=1):
-        print(f"  [{idx}] {item.get('match_id','')} | {item.get('you_sell_asset','')}->{item.get('you_buy_asset','')} | readiness={item.get('readiness','')}")
+    for idx, item in enumerate(matches[:MAX_LIST_ITEMS], start=1):
+        print(f"  [{idx}] {_short_id(item.get('match_id',''))} | {item.get('you_sell_asset','')}->{item.get('you_buy_asset','')} | {item.get('readiness','')}")
 
     print('\nCurrent swaps:')
     if not swaps:
         print('  none')
-    for item in swaps[:10]:
+    for item in swaps[:MAX_LIST_ITEMS]:
         invoice = fee_invoices.get(item.get('swap_id', ''), None)
         invoice_status = (invoice or {}).get('payment_status', 'none')
-        print(f"  - {item.get('swap_id','')} | state={item.get('state','')} | fee={invoice_status}")
+        print(f"  - {_short_id(item.get('swap_id',''))} | {item.get('state','')} | fee={invoice_status}")
 
     if matches:
         print('\nSmall explanation: confirming match starts private swap coordination.')
@@ -252,12 +255,12 @@ def _my_orders_flow(adapter: Any):
                 session = result.get('session') or {}
                 swap = result.get('swap') or {}
                 swap_id = swap.get('swap_id', '')
-                print(f"[OK] Match confirmed: {selected_match_id}")
-                print(f"Swap ID: {swap_id}")
+                print(f"Match confirmed: {_short_id(selected_match_id)}")
+                print(f"Swap ID: {_short_id(swap_id)}")
                 if swap_id:
                     _guided_swap_loop(adapter, actor_ctx, selected_match_id, swap_id, session=session)
                 return
-            print('[!] Invalid match selection.')
+            print('Invalid match selection.')
 
     open_swap = input('Open a swap by ID (optional): ').strip()
     if not open_swap:
@@ -285,17 +288,17 @@ def run_simple_cli(adapter: Any):
         }
         try:
             if choice == '3':
-                print('[SHUTDOWN] Stopping node...')
+                print('Stopping node...')
                 raise SystemExit(0)
             handler = handlers.get(choice)
             if handler is None:
-                print('[!] Invalid option.')
+                print('Invalid option.')
                 continue
             handler()
         except KeyboardInterrupt:
-            print('\n[SHUTDOWN] Interrupted by user.')
+            print('\nInterrupted by user.')
             raise SystemExit(0)
         except SystemExit:
             raise
         except Exception as e:  # noqa: BLE001 - CLI boundary should never crash on adapter/runtime errors.
-            print(f'[X] Operation failed: {e}')
+            print(f'Operation failed: {e}')
