@@ -6,12 +6,10 @@ ONESEAM simplified CLI (default user experience).
 
 This module intentionally hides low-level protocol internals and presents
 an operator-friendly workflow:
+0) Node Status
 1) Post Order
-2) Check Matches
-3) Accept Match & Swap
-4) My Orders
-5) Help
-6) Exit
+2) My Orders
+3) Exit
 
 It depends on an adapter object provided by oneseam.py.
 """
@@ -63,13 +61,14 @@ def _status_banner() -> None:
     print('=' * 58)
     print('  0. Node Status')
     print('  1. Post Order')
-    print('  2. My Orders')
+    print('  2. My Orders  (active orders + match alerts)')
     print('  3. Exit')
     print('=' * 58)
+    print('Tip: if a match appears, confirm it in "My Orders".')
 
 
 def _select_expiry_ms() -> int:
-    print('\nOrder expires in:')
+    print('\nOrder validity (how long this order stays open):')
     print('  1. 15 minutes')
     print('  2. 1 hour')
     print('  3. 24 hours')
@@ -86,19 +85,19 @@ def _post_order_flow(adapter: Any):
     client_id = _ask_non_empty('Client ID: ')
     wallet = _ask_non_empty('Wallet address: ')
 
-    print('\nSide:')
+    print('\nOrder side:')
     print('  1. Sell')
     print('  2. Buy')
     side = input('Select [1]: ').strip() or '1'
 
     if side == '1':
-        sell_asset = _ask_non_empty('Sell asset (e.g. BTC): ').upper()
-        buy_asset = _ask_non_empty('Buy asset (e.g. USDT): ').upper()
+        sell_asset = _ask_non_empty('Sell asset (coin you have, e.g. BTC): ').upper()
+        buy_asset = _ask_non_empty('Buy asset (coin you want, e.g. USDT): ').upper()
         amount = _ask_float(f'Amount to sell ({sell_asset}): ')
         print(f'Price range ({buy_asset} per {sell_asset}):')
     else:
-        buy_asset = _ask_non_empty('Asset to buy (e.g. BTC): ').upper()
-        sell_asset = _ask_non_empty('Asset to pay (e.g. USDT): ').upper()
+        buy_asset = _ask_non_empty('Asset to buy (coin you want, e.g. BTC): ').upper()
+        sell_asset = _ask_non_empty('Asset to pay (coin you have, e.g. USDT): ').upper()
         amount = _ask_float(f'Max budget to spend ({sell_asset}): ')
         print(f'Price range ({sell_asset} per {buy_asset}):')
 
@@ -120,33 +119,27 @@ def _post_order_flow(adapter: Any):
     intent = adapter.post_order(payload, actor_ctx)
 
     print('\n[OK] Order posted.')
-    print(f"Intent ID: {intent.get('intent_id', '')}")
+    print(f"Order ID: {intent.get('intent_id', '')}")
     matches = intent.get('matches_detected') or []
     if matches:
         print(f"Matches detected: {', '.join(matches)}")
-        print("Tip: run '2. My Orders' to review and confirm matches.")
+        print("Next step: open '2. My Orders' and confirm the match.")
     else:
-        print("No immediate match. Monitor in '2. My Orders'.")
+        print("No match yet. Keep monitoring in '2. My Orders'.")
 
 
-def _check_matches_flow(adapter: Any):
-    print('\n' + '-' * 58)
-    print('CHECK MATCHES')
-    print('-' * 58)
-    client_id = _ask_non_empty('Client ID: ')
-    actor_ctx = {'client_id': client_id}
-    matches = adapter.list_matches(actor_ctx)
-    if not matches:
-        print('No matches found.')
-        return
-    print(f"Found {len(matches)} match(es):")
-    for idx, item in enumerate(matches, start=1):
-        print(f"  [{idx}] {item.get('match_id','')}")
-        print(f"      Side: {item.get('you_side','')}")
-        print(f"      You: {item.get('you_sell_asset','')} -> {item.get('you_buy_asset','')} | amount={item.get('you_amount','')}")
-        print(f"      Price overlap: {item.get('overlap_min','')} - {item.get('overlap_max','')}")
-        print(f"      Suggested price: {item.get('suggested_price','')}")
-        print(f"      Readiness: {item.get('readiness','')}")
+def _swap_state_hint(state: str) -> str:
+    hints = {
+        'WAIT_LOCK_A': 'Waiting for first lock transaction proof.',
+        'WAIT_LOCK_B': 'Waiting for second lock transaction proof.',
+        'READY_CLAIM': 'Both locks confirmed. Claim can proceed.',
+        'CLAIMED_A': 'Side A claimed. Waiting side B claim.',
+        'CLAIMED_B': 'Side B claimed. Waiting side A claim.',
+        'COMPLETED': 'Swap completed.',
+        'REFUNDED': 'Swap refunded.',
+        'FAILED': 'Swap failed.',
+    }
+    return hints.get(state, 'Swap in progress.')
 
 
 def _guided_swap_loop(
@@ -166,9 +159,9 @@ def _guided_swap_loop(
         fee_invoice = (orders.get('fee_invoices') or {}).get(swap_id)
 
         print('\n' + '-' * 58)
-        print(f"SWAP STATUS: {swap.get('state','')}")
-        print(f"Swap ID: {swap_id}")
-        print(f"Match ID: {match_id}")
+        state = str(swap.get('state', ''))
+        print(f"Swap status: {state}")
+        print(_swap_state_hint(state))
         if fee_invoice:
             print(f"Fee: {fee_invoice.get('fee_amount','')} {fee_invoice.get('fee_asset','')} | status={fee_invoice.get('payment_status','')}")
 
@@ -185,16 +178,16 @@ def _guided_swap_loop(
             return
 
         recommended = actions[0]
-        print(f"Recommended: {recommended.get('label','')} ({recommended.get('code','')})")
+        print(f"Recommended now: {recommended.get('label','')}")
         if recommended.get('auto') and not recommended.get('risky'):
             auto_run = input('Run recommended action now? (y/n): ').strip().lower()
             if auto_run == 'y':
                 adapter.execute_next_action(recommended, actor_ctx, source='simple_cli')
                 continue
 
-        print('Available actions:')
+        print('Available actions (confirm-required = irreversible):')
         for idx, act in enumerate(actions, start=1):
-            risk = 'RISK' if act.get('risky') else 'SAFE'
+            risk = 'confirm-required' if act.get('risky') else 'safe'
             print(f"  {idx}. {act.get('label','')} [{risk}]")
         print(f"  {len(actions) + 1}. Back")
         chosen = input('Select option: ').strip()
@@ -206,48 +199,6 @@ def _guided_swap_loop(
             print('[!] Invalid option.')
             continue
         adapter.execute_next_action(selected, actor_ctx, source='simple_cli')
-
-
-def _accept_match_and_swap_flow(adapter: Any):
-    print('\n' + '-' * 58)
-    print('ACCEPT MATCH & SWAP')
-    print('-' * 58)
-    client_id = _ask_non_empty('Client ID: ')
-    actor_ctx = {'client_id': client_id}
-    matches = adapter.list_matches(actor_ctx)
-    if not matches:
-        print('No matches available.')
-        return
-    for idx, item in enumerate(matches, start=1):
-        print(f"  [{idx}] {item.get('match_id','')} | readiness={item.get('readiness','')}")
-        print(f"      You: {item.get('you_sell_asset','')} -> {item.get('you_buy_asset','')} | amount={item.get('you_amount','')}")
-        print(f"      Price overlap: {item.get('overlap_min','')} - {item.get('overlap_max','')}")
-
-    raw = input('Select match number or enter match_id: ').strip()
-    selected_match_id = ''
-    if raw.isdigit():
-        pick = int(raw)
-        if pick < 1 or pick > len(matches):
-            print('[!] Invalid option.')
-            return
-        selected_match_id = matches[pick - 1].get('match_id', '')
-    else:
-        selected_match_id = raw
-    if not selected_match_id:
-        print('[!] Match ID is required.')
-        return
-    confirm = input(f'Accept match {selected_match_id} and start swap? (y/n): ').strip().lower()
-    if confirm != 'y':
-        return
-    result = adapter.accept_match_and_start(selected_match_id, actor_ctx)
-    session = result.get('session') or {}
-    swap = result.get('swap') or {}
-    swap_id = swap.get('swap_id', '')
-    print('[OK] Match accepted.')
-    print(f"Session ID: {session.get('session_id','')}")
-    print(f"Swap ID: {swap_id}")
-    if swap_id:
-        _guided_swap_loop(adapter, actor_ctx, selected_match_id, swap_id, session=session)
 
 
 def _my_orders_flow(adapter: Any):
@@ -264,21 +215,29 @@ def _my_orders_flow(adapter: Any):
     terminal_intent_statuses = {'CANCELLED', 'EXPIRED', 'SETTLED', 'COMPLETED'}
     active_intents = [x for x in intents if str(x.get('status', '')).upper() not in terminal_intent_statuses]
     print(f"Active orders: {len(active_intents)} | Matches: {len(matches)} | Swaps: {len(swaps)}")
-    for item in active_intents[:20]:
-        print(f"  - intent {item.get('intent_id','')} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
-    print('\nMatches:')
-    for idx, item in enumerate(matches[:20], start=1):
-        print(f"  [{idx}] {item.get('match_id','')} | readiness={item.get('readiness','')} | status={item.get('status','')}")
-        print(f"      You: {item.get('you_sell_asset','')} -> {item.get('you_buy_asset','')} | amount={item.get('you_amount','')}")
-        print(f"      Price overlap: {item.get('overlap_min','')} - {item.get('overlap_max','')}")
-    print('\nSwaps:')
-    for item in swaps[:20]:
+    print('\nOpen orders:')
+    if not active_intents:
+        print('  none')
+    for item in active_intents[:10]:
+        print(f"  - {item.get('intent_id','')} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
+
+    print('\nMatches found:')
+    if not matches:
+        print('  none')
+    for idx, item in enumerate(matches[:10], start=1):
+        print(f"  [{idx}] {item.get('match_id','')} | {item.get('you_sell_asset','')}->{item.get('you_buy_asset','')} | readiness={item.get('readiness','')}")
+
+    print('\nCurrent swaps:')
+    if not swaps:
+        print('  none')
+    for item in swaps[:10]:
         invoice = fee_invoices.get(item.get('swap_id', ''), None)
         invoice_status = (invoice or {}).get('payment_status', 'none')
-        print(f"  - swap {item.get('swap_id','')} | state={item.get('state','')} | fee={invoice_status}")
+        print(f"  - {item.get('swap_id','')} | state={item.get('state','')} | fee={invoice_status}")
 
     if matches:
-        confirm_match = input('Confirm and start a match now? (y/n): ').strip().lower()
+        print('\nSmall explanation: confirming match starts private swap coordination.')
+        confirm_match = input('Confirm a match now? (y/n): ').strip().lower()
         if confirm_match == 'y':
             raw = input('Select match number or enter match_id: ').strip()
             selected_match_id = ''
@@ -294,14 +253,13 @@ def _my_orders_flow(adapter: Any):
                 swap = result.get('swap') or {}
                 swap_id = swap.get('swap_id', '')
                 print(f"[OK] Match confirmed: {selected_match_id}")
-                print(f"Session ID: {session.get('session_id','')}")
                 print(f"Swap ID: {swap_id}")
                 if swap_id:
                     _guided_swap_loop(adapter, actor_ctx, selected_match_id, swap_id, session=session)
                 return
             print('[!] Invalid match selection.')
 
-    open_swap = input('Open a swap for guided actions (swap_id, optional): ').strip()
+    open_swap = input('Open a swap by ID (optional): ').strip()
     if not open_swap:
         return
     match_id = ''
@@ -310,19 +268,6 @@ def _my_orders_flow(adapter: Any):
             match_id = swap.get('match_id', '')
             break
     _guided_swap_loop(adapter, actor_ctx, match_id, open_swap, session=None)
-
-
-def _help_flow():
-    print('\n' + '-' * 58)
-    print('HELP')
-    print('-' * 58)
-    print('1) Post Order: submit a private intent with price range and expiry.')
-    print('2) Check Matches: list compatible matches found by the network.')
-    print('3) Accept Match & Swap: opens session, starts HTLC flow, and guides next actions.')
-    print('4) My Orders: view intents, matches, swaps, and fee state.')
-    print('5) Safety: irreversible actions (claim/refund/fee confirm) always require explicit confirmation.')
-    print('0) Node Status: quick health/status access.')
-    print('-' * 58)
 
 
 def run_simple_cli(adapter: Any):
