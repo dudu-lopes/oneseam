@@ -65,11 +65,14 @@ def _short_id(value: str, max_len: int = 20) -> str:
 
 
 def _status_banner() -> None:
-    print('\nONESEAM MENU')
-    print('0. Node Status')
-    print('1. Post Order')
-    print('2. My Orders')
-    print('3. Exit')
+    print('\n' + '=' * 58)
+    print('  ONESEAM MENU')
+    print('=' * 58)
+    print('  0. Node Status')
+    print('  1. Post Order')
+    print('  2. My Orders')
+    print('  3. Exit')
+    print('=' * 58)
     print('Tip: confirm matches in "My Orders".')
 
 
@@ -84,7 +87,9 @@ def _select_expiry_ms() -> int:
 
 
 def _post_order_flow(adapter: Any):
-    print('\nPost Order')
+    print('\n' + '-' * 58)
+    print('POST ORDER')
+    print('-' * 58)
 
     client_id = _ask_non_empty('Client ID: ')
     wallet = _ask_non_empty('Wallet address: ')
@@ -159,11 +164,11 @@ def _guided_swap_loop(
         match = _find_item_by_id(orders.get('matches', []), 'match_id', match_id)
         swap = _find_item_by_id(orders.get('swaps', []), 'swap_id', swap_id)
         if not swap:
-            print('Swap not available anymore.')
+            print('[INFO] Swap no longer available.')
             return
         fee_invoice = (orders.get('fee_invoices') or {}).get(swap_id)
 
-        print('\nSwap')
+        print('\n' + '-' * 58)
         state = str(swap.get('state', ''))
         print(f"Swap status: {state}")
         print(_swap_state_hint(state))
@@ -179,7 +184,7 @@ def _guided_swap_loop(
             actor_ctx=actor_ctx
         )
         if not actions:
-            print('No pending actions.')
+            print('[OK] No pending actions.')
             return
 
         recommended = actions[0]
@@ -201,13 +206,15 @@ def _guided_swap_loop(
         try:
             selected = actions[int(chosen) - 1]
         except (ValueError, IndexError):
-            print('Invalid option.')
+            print('[!] Invalid option.')
             continue
         adapter.execute_next_action(selected, actor_ctx, source='simple_cli')
 
 
 def _my_orders_flow(adapter: Any):
-    print('\nMy Orders')
+    print('\n' + '-' * 58)
+    print('MY ORDERS')
+    print('-' * 58)
     client_id = _ask_non_empty('Client ID: ')
     actor_ctx = {'client_id': client_id}
     orders = adapter.list_orders(actor_ctx)
@@ -255,12 +262,12 @@ def _my_orders_flow(adapter: Any):
                 session = result.get('session') or {}
                 swap = result.get('swap') or {}
                 swap_id = swap.get('swap_id', '')
-                print(f"Match confirmed: {_short_id(selected_match_id)}")
+                print(f"[OK] Match confirmed: {_short_id(selected_match_id)}")
                 print(f"Swap ID: {_short_id(swap_id)}")
                 if swap_id:
                     _guided_swap_loop(adapter, actor_ctx, selected_match_id, swap_id, session=session)
                 return
-            print('Invalid match selection.')
+            print('[!] Invalid match selection.')
 
     open_swap = input('Open a swap by ID (optional): ').strip()
     if not open_swap:
@@ -288,17 +295,17 @@ def run_simple_cli(adapter: Any):
         }
         try:
             if choice == '3':
-                print('Stopping node...')
+                print('[SHUTDOWN] Stopping node...')
                 raise SystemExit(0)
             handler = handlers.get(choice)
             if handler is None:
-                print('Invalid option.')
+                print('[!] Invalid option.')
                 continue
             handler()
         except KeyboardInterrupt:
-            print('\nInterrupted by user.')
+            print('\n[SHUTDOWN] Interrupted by user.')
             raise SystemExit(0)
         except SystemExit:
             raise
         except Exception as e:  # noqa: BLE001 - CLI boundary should never crash on adapter/runtime errors.
-            print(f'Operation failed: {e}')
+            print(f'[X] Operation failed: {e}')
