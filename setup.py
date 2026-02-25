@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Eduardo de Figueiredo.
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: BUSL-1.1
 
 from pathlib import Path
 
@@ -22,6 +22,6 @@ setup(
     py_modules=["oneseam", "oneseam_blind_matching", "oneseam_simple_cli"],
     python_requires=">=3.12",
     install_requires=REQUIREMENTS,
-    license="GNU Affero General Public License v3",
+    license="Business Source License 1.1",
     url="https://github.com/dudu-lopes/oneseam",
 )

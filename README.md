@@ -1,4 +1,4 @@
-﻿<!-- Copyright (c) 2026 Eduardo de Figueiredo. SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- Copyright (c) 2026 Eduardo de Figueiredo. SPDX-License-Identifier: BUSL-1.1 -->
 
 # ONESEAM Dark Pool
 
@@ -65,5 +65,5 @@ python oneseam.py api
 - Never commit private keys, tokens, or production certificates.
 
 ## License
-ONESEAM is open-source software released under the GNU AGPL-3.0 license.
+ONESEAM is source-available software released under the Business Source License 1.1 (BSL 1.1).
 See `LICENSE` for full terms.

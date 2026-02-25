@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Eduardo de Figueiredo.
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: BUSL-1.1
 
 """Simple API usage example for ONESEAM v2.
 
