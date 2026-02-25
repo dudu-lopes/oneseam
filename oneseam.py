@@ -4199,43 +4199,28 @@ def print_status():
     print('  ONESEAM DARKPOOL NODE STATUS')
     print('='*47)
     print(f'Node ID: {node_id[:16]}...')
-    relay_status = 'Blind Relay ON' if BLIND_RELAY_ENABLED else 'Blind Relay OFF'
-    print(f'Transport: {TRANSPORT_MODE} | Quorum: {DEFAULT_QUORUM_K}-of-{DEFAULT_QUORUM_N} | {relay_status}')
-    print(f'Domain: DarkPool P2P (enabled={DARKPOOL_ENABLED}) | Legacy OTC API (enabled={LEGACY_OTC_API_ENABLED})')
-    print(f'Blind Matching: enabled={BLIND_MATCHING_ENABLED} | available={BLIND_MATCHING_AVAILABLE} | slot={BLIND_PRICE_SLOT_SIZE}')
-    shard_count = len(list_shards())
-    manifest_count = len(list_manifest_records())
+    print(f'Node address (P2P): 0.0.0.0:{NODE_PORT}')
+    print(f'API address: {API_BIND}:{API_PORT}')
+    print(f'Transport: {TRANSPORT_MODE} | Quorum: {DEFAULT_QUORUM_K}-of-{DEFAULT_QUORUM_N}')
     intent_count = len(STORAGE_DB.list_open_trade_intents())
     cur = STORAGE_DB._execute("SELECT COUNT(*) FROM matches")
     match_count = int(cur.fetchone()[0]) if cur else 0
     cur = STORAGE_DB._execute("SELECT COUNT(*) FROM swap_coordination")
     swap_count = int(cur.fetchone()[0]) if cur else 0
-    rfq_count = len(STORAGE_DB.list_rfqs()) if LEGACY_OTC_API_ENABLED else 0
-    trade_count = len(STORAGE_DB.list_trades()) if LEGACY_OTC_API_ENABLED else 0
-    print(f'Storage: db_backend={DB_BACKEND}')
-    print(f'Shards: {shard_count}')
-    print(f'Private instructions: {manifest_count}')
-    print(f'DarkPool intents(open): {intent_count}')
-    print(f'DarkPool matches: {match_count}')
-    print(f'DarkPool swaps: {swap_count}')
-    if LEGACY_OTC_API_ENABLED:
-        print(f'Legacy RFQs: {rfq_count}')
-        print(f'Legacy trades: {trade_count}')
+    print(f'Orders open: {intent_count} | Matches: {match_count} | Swaps: {swap_count}')
     
     with neighbors_lock:
-        count = len(neighbors)
-        print(f'Network: {count} neighbors')
+        peer_items = list(neighbors.items())
+        count = len(peer_items)
+        print(f'Network: {count} peers online')
         if count == 0:
             print('  (no peers discovered yet)')
         else:
-            for nid, info in list(neighbors.items())[:20]:
+            print('  Address = IP:Port of each peer node.')
+            for nid, info in peer_items[:8]:
                 ip = info.get('ip', '-')
                 port = info.get('node_port', NODE_PORT)
-                served = info.get('served_destinations') or []
-                served_str = ','.join(served) if served else '-'
-                region = info.get('region', '-')
-                last = info.get('last_seen', '-')
-                print(f'  - {nid[:8]}... @ {ip}:{port} | serves: {served_str} | region: {region} | seen {last}')
+                print(f'  - {nid[:8]}... | address: {ip}:{port}')
 
 # ===== PRIVATE OTC PAYLOAD =====
 def generate_instruction_id() -> str:

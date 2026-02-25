@@ -74,6 +74,7 @@ def _status_banner() -> None:
     print('  3. Exit')
     print('=' * 58)
     print('Tip: confirm matches in "My Orders".')
+    print('ID flow: Order ID -> Match ID -> Swap ID')
 
 
 def _select_expiry_ms() -> int:
@@ -91,7 +92,7 @@ def _post_order_flow(adapter: Any):
     print('POST ORDER')
     print('-' * 58)
 
-    client_id = _ask_non_empty('Client ID: ')
+    client_id = _ask_non_empty('Client ID (your ONESEAM user name): ')
     wallet = _ask_non_empty('Wallet address: ')
 
     print('\nOrder side:')
@@ -129,6 +130,7 @@ def _post_order_flow(adapter: Any):
 
     print('\nOrder posted.')
     print(f"Order ID: {_short_id(intent.get('intent_id', ''))}")
+    print('Order ID identifies this order in "My Orders".')
     matches = intent.get('matches_detected') or []
     if matches:
         pretty = ', '.join(_short_id(x) for x in matches[:MAX_LIST_ITEMS])
@@ -215,7 +217,7 @@ def _my_orders_flow(adapter: Any):
     print('\n' + '-' * 58)
     print('MY ORDERS')
     print('-' * 58)
-    client_id = _ask_non_empty('Client ID: ')
+    client_id = _ask_non_empty('Client ID (same used in Post Order): ')
     actor_ctx = {'client_id': client_id}
     orders = adapter.list_orders(actor_ctx)
     intents = orders.get('intents') or []
@@ -225,6 +227,7 @@ def _my_orders_flow(adapter: Any):
     terminal_intent_statuses = {'CANCELLED', 'EXPIRED', 'SETTLED', 'COMPLETED'}
     active_intents = [x for x in intents if str(x.get('status', '')).upper() not in terminal_intent_statuses]
     print(f"Active orders: {len(active_intents)} | Matches: {len(matches)} | Swaps: {len(swaps)}")
+    print('Order ID = your order | Match ID = compatible pair | Swap ID = active execution')
     print('\nOpen orders:')
     if not active_intents:
         print('  none')
@@ -232,6 +235,7 @@ def _my_orders_flow(adapter: Any):
         print(f"  - {_short_id(item.get('intent_id',''))} | {item.get('sell_asset','')}->{item.get('buy_asset','')} | {item.get('status','')}")
 
     print('\nMatches found:')
+    print('Readiness: READY (can start), IN_PROGRESS (already started), DONE (finished)')
     if not matches:
         print('  none')
     for idx, item in enumerate(matches[:MAX_LIST_ITEMS], start=1):
@@ -247,6 +251,7 @@ def _my_orders_flow(adapter: Any):
 
     if matches:
         print('\nSmall explanation: confirming match starts private swap coordination.')
+        print('Tip: use the list number (1,2,3...) or paste the full Match ID.')
         confirm_match = input('Confirm a match now? (y/n): ').strip().lower()
         if confirm_match == 'y':
             raw = input('Select match number or enter match_id: ').strip()
@@ -269,6 +274,7 @@ def _my_orders_flow(adapter: Any):
                 return
             print('[!] Invalid match selection.')
 
+    print('Tip: to continue a running swap, paste a Swap ID from "Current swaps".')
     open_swap = input('Open a swap by ID (optional): ').strip()
     if not open_swap:
         return
