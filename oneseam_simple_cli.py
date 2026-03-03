@@ -64,6 +64,30 @@ def _short_id(value: str, max_len: int = 20) -> str:
     return f"{text[:10]}...{text[-6:]}"
 
 
+def _ensure_client_id(cli_state: dict[str, Any]) -> str:
+    current = str(cli_state.get('client_id', '')).strip()
+    if current:
+        return current
+    client_id = _ask_non_empty('Client ID (your ONESEAM user name): ')
+    cli_state['client_id'] = client_id
+    return client_id
+
+
+def _friendly_action_label(action: dict[str, Any]) -> str:
+    code = str(action.get('code', '')).strip().upper()
+    labels = {
+        'SEND_LOCK_A': 'Confirm first side funds lock',
+        'SEND_LOCK_B': 'Confirm second side funds lock',
+        'SEND_CLAIM_A': 'Complete claim for first side',
+        'SEND_CLAIM_B': 'Complete claim for second side',
+        'REFUND_A': 'Refund first side',
+        'REFUND_B': 'Refund second side',
+        'ISSUE_FEE': 'Generate service fee invoice',
+        'CONFIRM_FEE': 'Confirm service fee payment',
+    }
+    return labels.get(code, str(action.get('label', 'Action')).strip())
+
+
 def _status_banner() -> None:
     print('\n' + '=' * 58)
     print('  ONESEAM MENU')
@@ -87,12 +111,13 @@ def _select_expiry_ms() -> int:
     return int(time.time() * 1000) + (expiry_seconds * 1000)
 
 
-def _post_order_flow(adapter: Any):
+def _post_order_flow(adapter: Any, cli_state: dict[str, Any]):
     print('\n' + '-' * 58)
     print('POST ORDER')
     print('-' * 58)
 
-    client_id = _ask_non_empty('Client ID (your ONESEAM user name): ')
+    client_id = _ensure_client_id(cli_state)
+    print(f'Client ID: {client_id}')
     print('Wallet address = your public wallet address (example: 0x...).')
     print('Use an address you control. You will sign actions with this wallet.')
     wallet = _ask_non_empty('Wallet address: ')
@@ -144,11 +169,11 @@ def _post_order_flow(adapter: Any):
 
 def _swap_state_hint(state: str) -> str:
     hints = {
-        'WAIT_LOCK_A': 'Waiting for first lock transaction proof.',
-        'WAIT_LOCK_B': 'Waiting for second lock transaction proof.',
-        'READY_CLAIM': 'Both locks confirmed. Claim can proceed.',
-        'CLAIMED_A': 'Side A claimed. Waiting side B claim.',
-        'CLAIMED_B': 'Side B claimed. Waiting side A claim.',
+        'WAIT_LOCK_A': 'Waiting first side to confirm funds lock.',
+        'WAIT_LOCK_B': 'Waiting second side to confirm funds lock.',
+        'READY_CLAIM': 'Both sides locked. Next step: claim.',
+        'CLAIMED_A': 'First side claimed. Waiting second side.',
+        'CLAIMED_B': 'Second side claimed. Waiting first side.',
         'COMPLETED': 'Swap completed.',
         'REFUNDED': 'Swap refunded.',
         'FAILED': 'Swap failed.',
@@ -192,7 +217,7 @@ def _guided_swap_loop(
             return
 
         recommended = actions[0]
-        print(f"Recommended now: {recommended.get('label','')}")
+        print(f"Recommended now: {_friendly_action_label(recommended)}")
         if recommended.get('auto') and not recommended.get('risky'):
             auto_run = input('Run recommended action now? (y/n): ').strip().lower()
             if auto_run == 'y':
@@ -202,7 +227,7 @@ def _guided_swap_loop(
         print('Available actions (confirm-required = irreversible):')
         for idx, act in enumerate(actions, start=1):
             risk = 'confirm-required' if act.get('risky') else 'safe'
-            print(f"  {idx}. {act.get('label','')} [{risk}]")
+            print(f"  {idx}. {_friendly_action_label(act)} [{risk}]")
         print(f"  {len(actions) + 1}. Back")
         chosen = input('Select option: ').strip()
         if chosen == str(len(actions) + 1):
@@ -215,11 +240,12 @@ def _guided_swap_loop(
         adapter.execute_next_action(selected, actor_ctx, source='simple_cli')
 
 
-def _my_orders_flow(adapter: Any):
+def _my_orders_flow(adapter: Any, cli_state: dict[str, Any]):
     print('\n' + '-' * 58)
     print('MY ORDERS')
     print('-' * 58)
-    client_id = _ask_non_empty('Client ID (same used in Post Order): ')
+    client_id = _ensure_client_id(cli_state)
+    print(f'Client ID: {client_id}')
     actor_ctx = {'client_id': client_id}
     orders = adapter.list_orders(actor_ctx)
     intents = orders.get('intents') or []
@@ -242,6 +268,16 @@ def _my_orders_flow(adapter: Any):
         print('  none')
     for idx, item in enumerate(matches[:MAX_LIST_ITEMS], start=1):
         print(f"  [{idx}] {_short_id(item.get('match_id',''))} | {item.get('you_sell_asset','')}->{item.get('you_buy_asset','')} | {item.get('readiness','')}")
+
+    seen_matches = cli_state.setdefault('seen_matches', {})
+    previous = set(seen_matches.get(client_id, []))
+    current = [str(item.get('match_id', '')).strip() for item in matches if item.get('match_id')]
+    if previous:
+        new_matches = [mid for mid in current if mid not in previous]
+        if new_matches:
+            pretty = ', '.join(_short_id(mid) for mid in new_matches[:MAX_LIST_ITEMS])
+            print(f'\nNew match alert: {pretty}')
+    seen_matches[client_id] = current
 
     print('\nCurrent swaps:')
     if not swaps:
@@ -293,13 +329,16 @@ def run_simple_cli(adapter: Any):
     Main loop for simplified CLI.
     Adapter methods are resolved from oneseam.py.
     """
+    cli_state: dict[str, Any] = {}
     while True:
         _status_banner()
+        if cli_state.get('client_id'):
+            print(f"Current client: {cli_state.get('client_id')}")
         choice = input('Select option: ').strip()
         handlers = {
             '0': adapter.node_status,
-            '1': lambda: _post_order_flow(adapter),
-            '2': lambda: _my_orders_flow(adapter),
+            '1': lambda: _post_order_flow(adapter, cli_state),
+            '2': lambda: _my_orders_flow(adapter, cli_state),
         }
         try:
             if choice == '3':
