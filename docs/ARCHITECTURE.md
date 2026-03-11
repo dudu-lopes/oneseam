@@ -3,7 +3,7 @@
 # Architecture
 
 ## Goal
-ONESEAM provides a non-custodial dark-pool style coordination layer for private P2P OTC trading.
+ONESEAM provides an intent dark-pool coordination layer for private P2P OTC trading.
 
 ## Core Principles
 - No custody of end-user funds.

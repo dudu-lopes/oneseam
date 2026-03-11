@@ -1,12 +1,13 @@
 <!-- Copyright (c) 2026 Eduardo de Figueiredo. SPDX-License-Identifier: BUSL-1.1 -->
 
-# ONESEAM Dark Pool
+# ONESEAM Intent Dark Pool
 
-ONESEAM is a non-custodial P2P coordination network for:
+ONESEAM is an **intent dark-pool**: a non-custodial P2P coordination network for:
 - private order discovery
 - private matching
 - HTLC settlement coordination (BTC + Lightning first)
 
+Orders are published as encrypted intents and sharded across the P2P network.
 The platform does not custody funds and does not sign end-user transactions on the backend.
 
 ## Quick Start
