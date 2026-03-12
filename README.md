@@ -57,7 +57,6 @@ python oneseam.py api
 - Architecture: `docs/ARCHITECTURE.md`
 - Installation: `docs/INSTALLATION.md`
 - API reference: `docs/API.md`
-- Security policy: `docs/SECURITY.md`
 
 ## Core Repository Layout
 - `oneseam.py`
