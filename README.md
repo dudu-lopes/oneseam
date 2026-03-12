@@ -10,6 +10,13 @@ ONESEAM is an **intent dark-pool**: a **Bitcoin-native** non-custodial P2P coord
 Orders are published as encrypted intents and sharded across the P2P network.
 The platform does not custody funds and does not sign end-user transactions on the backend.
 
+## Competitive Differentiators
+- **Intent dark-pool model:** no public order book and no single node can reconstruct a full order.
+- **Bitcoin-native settlement:** BTC + Lightning first, with HTLC coordination and wallet-to-wallet execution.
+- **Non-custodial by design:** the platform never holds funds or signs transactions.
+- **Privacy-first matching:** blind commitments and bucketed overlap detection reduce information leakage.
+- **Auditability without disclosure:** immutable audit chain for actions without exposing private order data.
+
 ## Quick Start
 ```bash
 pip install -r requirements.txt
