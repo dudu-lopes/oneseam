@@ -3,7 +3,7 @@
 # Architecture
 
 ## Goal
-ONESEAM provides an intent dark-pool coordination layer for private P2P OTC trading.
+ONESEAM provides an intent dark-pool coordination layer for private P2P OTC trading, Bitcoin-native (BTC + Lightning first).
 
 ## Core Principles
 - No custody of end-user funds.

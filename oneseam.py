@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 """
-ONESEAM - Intent Dark-Pool P2P Non-Custodial Trading Coordination
+ONESEAM - Intent Dark-Pool Bitcoin-native P2P Non-Custodial Trading Coordination
 Version: 3.2.0
 
 Enterprise-grade decentralized coordination with privacy-preserving transport.

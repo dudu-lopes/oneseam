@@ -2,7 +2,7 @@
 
 # ONESEAM Intent Dark Pool
 
-ONESEAM is an **intent dark-pool**: a non-custodial P2P coordination network for:
+ONESEAM is an **intent dark-pool**: a **Bitcoin-native** non-custodial P2P coordination network for:
 - private order discovery
 - private matching
 - HTLC settlement coordination (BTC + Lightning first)
