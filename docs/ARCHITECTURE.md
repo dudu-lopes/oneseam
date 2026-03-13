@@ -20,7 +20,7 @@ ONESEAM provides an intent dark-pool coordination layer for private P2P OTC trad
 1. Trader posts an intent (wallet-attested when required).
 2. Node stores intent metadata and distributes private payload fragments.
 3. Matching engine identifies compatible counterparties.
-4. Traders open a secure session and start HTLC coordination.
+4. Traders open a secure session and start HTLC coordination (batch matches share a preimage).
 5. Proof events advance swap state to terminal outcome.
 6. Fee invoice can be issued post-settlement.
 

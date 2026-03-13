@@ -87,6 +87,11 @@ darkpool_enabled: true
 production_mode: false
 intent_bucket_size_price: 100.0
 intent_bucket_size_amount: 0.1
+batch_matching_enabled: true
+batch_min_participants: 2
+batch_max_participants: 8
+batch_allow_partial: false
+batch_secret_key_id: "batch_secret"
 blind_matching_enabled: true
 blind_price_slot_size: 100.0
 blind_max_price_slots: 2048

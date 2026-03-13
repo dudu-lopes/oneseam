@@ -9,7 +9,7 @@ Enterprise-grade decentralized coordination with privacy-preserving transport.
 - Byzantine fault-tolerant (configurable k-of-n quorum)
 - Shamir Secret Sharing (zero-knowledge sharding)
 - Trade Intent/Match/Session lifecycle with HTLC coordination
-- Blind Relay (Repasse Cego) - nodes accept and relay shards toward destination
+- Blind Relay - nodes accept and relay shards toward destination
 - AES-256-GCM encryption
 - On-grid / off-grid mesh network capable
 - REST API for enterprise integration
@@ -236,6 +236,7 @@ if PYDANTIC_AVAILABLE:
         tx_hash: str
         confirmations: int = 0
         secret: Optional[str] = None
+        leg_id: Optional[str] = None
         signer_wallet: Optional[str] = None
         wallet_signature: Optional[str] = None
         wallet_nonce: Optional[str] = None
@@ -412,6 +413,11 @@ DARKPOOL_ENABLED = _as_bool(_config('darkpool_enabled', True))
 LEGACY_OTC_API_ENABLED = _as_bool(_config('legacy_otc_api_enabled', True))
 INTENT_BUCKET_SIZE_PRICE = float(_config('intent_bucket_size_price', 100.0))
 INTENT_BUCKET_SIZE_AMOUNT = float(_config('intent_bucket_size_amount', 0.1))
+BATCH_MATCHING_ENABLED = _as_bool(_config('batch_matching_enabled', True))
+BATCH_MIN_PARTICIPANTS = int(_config('batch_min_participants', 2))
+BATCH_MAX_PARTICIPANTS = int(_config('batch_max_participants', 8))
+BATCH_ALLOW_PARTIAL = _as_bool(_config('batch_allow_partial', False))
+BATCH_SECRET_KEY_ID = str(_config('batch_secret_key_id', 'batch_secret'))
 BLIND_MATCHING_ENABLED = _as_bool(_config('blind_matching_enabled', True))
 BLIND_PRICE_SLOT_SIZE = float(_config('blind_price_slot_size', _config('price_slot_size', INTENT_BUCKET_SIZE_PRICE)))
 BLIND_MAX_PRICE_SLOTS = int(_config('blind_max_price_slots', 2048))
@@ -496,6 +502,7 @@ OTC_ACTION_INVALID_STATE_ERROR = {
 # Dark-pool statuses
 INTENT_STATUS_OPEN = 'OPEN'
 INTENT_STATUS_MATCHED = 'MATCHED'
+INTENT_STATUS_PARTIAL = 'PARTIAL'
 INTENT_STATUS_CANCELLED = 'CANCELLED'
 INTENT_STATUS_EXPIRED = 'EXPIRED'
 MATCH_STATUS_FOUND = 'FOUND'
@@ -781,6 +788,21 @@ class StorageDB:
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
                 cur.execute("""
+                CREATE TABLE IF NOT EXISTS match_participants (
+                    match_id TEXT,
+                    intent_id TEXT,
+                    client_id TEXT,
+                    side TEXT,
+                    amount REAL,
+                    overlap_min REAL,
+                    overlap_max REAL,
+                    created_at INTEGER,
+                    PRIMARY KEY (match_id, intent_id)
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_match_participants_client ON match_participants(client_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_match_participants_match ON match_participants(match_id)")
+                cur.execute("""
                 CREATE TABLE IF NOT EXISTS secure_sessions (
                     session_id TEXT PRIMARY KEY,
                     match_id TEXT,
@@ -1035,6 +1057,21 @@ class StorageDB:
                 )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS match_participants (
+                    match_id TEXT,
+                    intent_id TEXT,
+                    client_id TEXT,
+                    side TEXT,
+                    amount REAL,
+                    overlap_min REAL,
+                    overlap_max REAL,
+                    created_at INTEGER,
+                    PRIMARY KEY (match_id, intent_id)
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_match_participants_client ON match_participants(client_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_match_participants_match ON match_participants(match_id)")
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS secure_sessions (
                     session_id TEXT PRIMARY KEY,
@@ -1675,11 +1712,14 @@ class StorageDB:
         row = cur.fetchone()
         if not row:
             return None
+        metadata = json.loads(row[12]) if row[12] else {}
+        if 'filled_amount' not in metadata:
+            metadata['filled_amount'] = 0.0
         return {
             'intent_id': row[0], 'maker_client_id': row[1], 'maker_wallet': row[2], 'sell_asset': row[3], 'buy_asset': row[4],
             'amount': float(row[5]), 'price_min': float(row[6]), 'price_max': float(row[7]), 'expiration': int(row[8]),
             'commitment_meta': json.loads(row[9]) if row[9] else {}, 'private_instruction_id': row[10], 'status': row[11],
-            'metadata': json.loads(row[12]) if row[12] else {}, 'created_at': row[13], 'updated_at': row[14]
+            'metadata': metadata, 'created_at': row[13], 'updated_at': row[14]
         }
 
     def update_trade_intent_status(self, intent_id: str, status: str):
@@ -1689,19 +1729,34 @@ class StorageDB:
                       else """UPDATE trade_intents SET status=%s, updated_at=%s WHERE intent_id=%s""",
                       (status, now_ms, intent_id))
 
+    def update_trade_intent(self, intent_id: str, status: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
+        now_ms = int(time.time() * 1000)
+        current = self.get_trade_intent(intent_id)
+        if not current:
+            return
+        new_status = status or current.get('status', INTENT_STATUS_OPEN)
+        new_meta = metadata if metadata is not None else (current.get('metadata') or {})
+        payload = (new_status, json.dumps(new_meta), now_ms, intent_id)
+        self._execute("""UPDATE trade_intents SET status=?, metadata_json=?, updated_at=? WHERE intent_id=?"""
+                      if self.backend == 'sqlite'
+                      else """UPDATE trade_intents SET status=%s, metadata_json=%s, updated_at=%s WHERE intent_id=%s""",
+                      payload)
+
     def list_open_trade_intents(self) -> List[Dict[str, Any]]:
         now_ms = int(time.time() * 1000)
         cur = self._execute("""SELECT intent_id FROM trade_intents
-                               WHERE status=? AND expiration>=? ORDER BY created_at DESC"""
+                               WHERE status IN (?,?) AND expiration>=? ORDER BY created_at DESC"""
                             if self.backend == 'sqlite'
                             else """SELECT intent_id FROM trade_intents
-                               WHERE status=%s AND expiration>=%s ORDER BY created_at DESC""",
-                            (INTENT_STATUS_OPEN, now_ms))
+                               WHERE status IN (%s,%s) AND expiration>=%s ORDER BY created_at DESC""",
+                            (INTENT_STATUS_OPEN, INTENT_STATUS_PARTIAL, now_ms))
         out = []
         for r in cur.fetchall():
             item = self.get_trade_intent(r[0])
             if item:
-                out.append(item)
+                remaining = float(item.get('amount', 0)) - float((item.get('metadata') or {}).get('filled_amount', 0))
+                if remaining > 0:
+                    out.append(item)
         return out
 
     def list_trade_intents_for_client(self, client_id: str, limit: int = 100) -> List[Dict[str, Any]]:
@@ -1744,6 +1799,41 @@ class StorageDB:
                          VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                       data)
 
+    def add_match_participant(self, participant: Dict[str, Any]):
+        now_ms = int(time.time() * 1000)
+        data = (
+            participant['match_id'], participant['intent_id'], participant.get('client_id', ''),
+            participant.get('side', ''), float(participant.get('amount', 0)),
+            float(participant.get('overlap_min', 0)), float(participant.get('overlap_max', 0)), now_ms
+        )
+        self._execute("""INSERT OR REPLACE INTO match_participants
+                         (match_id, intent_id, client_id, side, amount, overlap_min, overlap_max, created_at)
+                         VALUES (?,?,?,?,?,?,?,?)"""
+                      if self.backend == 'sqlite'
+                      else """INSERT INTO match_participants
+                         (match_id, intent_id, client_id, side, amount, overlap_min, overlap_max, created_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                         ON CONFLICT (match_id, intent_id)
+                         DO UPDATE SET client_id=EXCLUDED.client_id, side=EXCLUDED.side, amount=EXCLUDED.amount,
+                                       overlap_min=EXCLUDED.overlap_min, overlap_max=EXCLUDED.overlap_max""",
+                      data)
+
+    def list_match_participants(self, match_id: str) -> List[Dict[str, Any]]:
+        cur = self._execute("""SELECT match_id, intent_id, client_id, side, amount, overlap_min, overlap_max, created_at
+                               FROM match_participants WHERE match_id=? ORDER BY created_at ASC"""
+                            if self.backend == 'sqlite'
+                            else """SELECT match_id, intent_id, client_id, side, amount, overlap_min, overlap_max, created_at
+                               FROM match_participants WHERE match_id=%s ORDER BY created_at ASC""",
+                            (match_id,))
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                'match_id': row[0], 'intent_id': row[1], 'client_id': row[2], 'side': row[3],
+                'amount': float(row[4]), 'overlap_min': float(row[5]), 'overlap_max': float(row[6]),
+                'created_at': row[7]
+            })
+        return out
+
     def find_match_by_intents(self, intent_a: str, intent_b: str) -> Optional[Dict[str, Any]]:
         cur = self._execute("""SELECT match_id FROM matches
                                WHERE (intent_sell_id=? AND intent_buy_id=?) OR (intent_sell_id=? AND intent_buy_id=?)
@@ -1766,11 +1856,39 @@ class StorageDB:
         row = cur.fetchone()
         if not row:
             return None
-        return {
+        match = {
             'match_id': row[0], 'intent_sell_id': row[1], 'intent_buy_id': row[2], 'overlap_min': float(row[3]),
             'overlap_max': float(row[4]), 'amount': float(row[5]), 'confidence': float(row[6]), 'status': row[7],
             'metadata': json.loads(row[8]) if row[8] else {}, 'created_at': row[9], 'updated_at': row[10]
         }
+        participants = self.list_match_participants(match_id)
+        if not participants and match.get('intent_sell_id') and match.get('intent_buy_id'):
+            sell_intent = self.get_trade_intent(match.get('intent_sell_id'))
+            buy_intent = self.get_trade_intent(match.get('intent_buy_id'))
+            if sell_intent:
+                participants.append({
+                    'match_id': match_id,
+                    'intent_id': sell_intent.get('intent_id', ''),
+                    'client_id': sell_intent.get('maker_client_id', ''),
+                    'side': 'SELL',
+                    'amount': float(match.get('amount', 0)),
+                    'overlap_min': float(match.get('overlap_min', 0)),
+                    'overlap_max': float(match.get('overlap_max', 0)),
+                    'created_at': match.get('created_at', 0)
+                })
+            if buy_intent:
+                participants.append({
+                    'match_id': match_id,
+                    'intent_id': buy_intent.get('intent_id', ''),
+                    'client_id': buy_intent.get('maker_client_id', ''),
+                    'side': 'BUY',
+                    'amount': float(match.get('amount', 0)),
+                    'overlap_min': float(match.get('overlap_min', 0)),
+                    'overlap_max': float(match.get('overlap_max', 0)),
+                    'created_at': match.get('created_at', 0)
+                })
+        match['participants'] = participants
+        return match
 
     def update_match_status(self, match_id: str, status: str):
         now_ms = int(time.time() * 1000)
@@ -1780,22 +1898,33 @@ class StorageDB:
                       (status, now_ms, match_id))
 
     def list_matches_for_client(self, client_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-        cur = self._execute("""SELECT m.match_id
-                               FROM matches m
-                               JOIN trade_intents a ON a.intent_id = m.intent_sell_id
-                               JOIN trade_intents b ON b.intent_id = m.intent_buy_id
-                               WHERE a.maker_client_id=? OR b.maker_client_id=?
-                               ORDER BY m.created_at DESC LIMIT ?"""
+        cur = self._execute("""SELECT DISTINCT match_id
+                               FROM match_participants WHERE client_id=?
+                               ORDER BY created_at DESC LIMIT ?"""
                             if self.backend == 'sqlite'
-                            else """SELECT m.match_id
-                               FROM matches m
-                               JOIN trade_intents a ON a.intent_id = m.intent_sell_id
-                               JOIN trade_intents b ON b.intent_id = m.intent_buy_id
-                               WHERE a.maker_client_id=%s OR b.maker_client_id=%s
-                               ORDER BY m.created_at DESC LIMIT %s""",
-                            (client_id, client_id, limit))
+                            else """SELECT DISTINCT match_id
+                               FROM match_participants WHERE client_id=%s
+                               ORDER BY created_at DESC LIMIT %s""",
+                            (client_id, limit))
+        rows = cur.fetchall()
+        if not rows:
+            cur = self._execute("""SELECT m.match_id
+                                   FROM matches m
+                                   JOIN trade_intents a ON a.intent_id = m.intent_sell_id
+                                   JOIN trade_intents b ON b.intent_id = m.intent_buy_id
+                                   WHERE a.maker_client_id=? OR b.maker_client_id=?
+                                   ORDER BY m.created_at DESC LIMIT ?"""
+                                if self.backend == 'sqlite'
+                                else """SELECT m.match_id
+                                   FROM matches m
+                                   JOIN trade_intents a ON a.intent_id = m.intent_sell_id
+                                   JOIN trade_intents b ON b.intent_id = m.intent_buy_id
+                                   WHERE a.maker_client_id=%s OR b.maker_client_id=%s
+                                   ORDER BY m.created_at DESC LIMIT %s""",
+                                (client_id, client_id, limit))
+            rows = cur.fetchall()
         out = []
-        for r in cur.fetchall():
+        for r in rows:
             item = self.get_match(r[0])
             if item:
                 out.append(item)
@@ -2413,6 +2542,7 @@ def _build_htlc_proof_attestation_payload(client: Dict[str, Any], swap: Dict[str
         'swap_id': swap.get('swap_id', ''),
         'actor_client_id': client.get('client_id', ''),
         'proof_type': str(proof.get('proof_type', '')).strip(),
+        'leg_id': str(proof.get('leg_id', '')).strip(),
         'tx_hash': _normalize_tx_hash(str(proof.get('tx_hash', '')).strip()),
         'confirmations': int(proof.get('confirmations', 0)),
         'secret_hash': secret_hash,
@@ -3399,7 +3529,9 @@ def _compute_overlap(a: Dict[str, Any], b: Dict[str, Any]) -> Optional[Dict[str,
     # a.amount is in a.sell_asset units.
     # b.amount is in b.sell_asset units (which equals a.buy_asset due to opposite pair).
     # Convert b capacity into a.sell_asset units conservatively using overlap_max (quote/base).
-    amount = min(float(a['amount']), float(b['amount']) / max(overlap_max, 1e-12))
+    a_remaining = float(a.get('amount', 0)) - float((a.get('metadata') or {}).get('filled_amount', 0))
+    b_remaining = float(b.get('amount', 0)) - float((b.get('metadata') or {}).get('filled_amount', 0))
+    amount = min(max(a_remaining, 0.0), max(b_remaining, 0.0) / max(overlap_max, 1e-12))
     amount = max(0.0, amount)
     if amount <= 0:
         return None
@@ -3469,12 +3601,32 @@ def _broadcast_blind_commitment(intent: Dict[str, Any], request_id: str = '') ->
     return instruction_id
 
 def _refresh_intent_expiry_state(intent: Dict[str, Any]):
-    if intent.get('status') == INTENT_STATUS_OPEN and _is_intent_expired(intent):
+    if intent.get('status') in (INTENT_STATUS_OPEN, INTENT_STATUS_PARTIAL) and _is_intent_expired(intent):
         STORAGE_DB.update_trade_intent_status(intent['intent_id'], INTENT_STATUS_EXPIRED)
+
+def _intent_remaining_amount(intent: Dict[str, Any]) -> float:
+    filled = float((intent.get('metadata') or {}).get('filled_amount', 0) or 0)
+    return max(0.0, float(intent.get('amount', 0)) - filled)
+
+def _apply_intent_fill(intent_id: str, fill_amount: float):
+    intent = STORAGE_DB.get_trade_intent(intent_id)
+    if not intent:
+        return
+    metadata = dict(intent.get('metadata') or {})
+    filled = float(metadata.get('filled_amount', 0) or 0)
+    new_filled = max(0.0, filled + float(fill_amount))
+    metadata['filled_amount'] = round(min(new_filled, float(intent.get('amount', 0))), 8)
+    new_status = INTENT_STATUS_MATCHED if metadata['filled_amount'] >= float(intent.get('amount', 0)) - 1e-9 else INTENT_STATUS_PARTIAL
+    STORAGE_DB.update_trade_intent(intent_id, status=new_status, metadata=metadata)
 
 def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> List[Dict[str, Any]]:
     candidates = STORAGE_DB.list_open_trade_intents()
-    matches = []
+    matches: List[Dict[str, Any]] = []
+    maker_remaining = _intent_remaining_amount(new_intent)
+    if maker_remaining <= 0:
+        return matches
+
+    candidates_with_overlap: List[Dict[str, Any]] = []
     for other in candidates:
         if not other:
             continue
@@ -3485,67 +3637,146 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
         if not _is_counterparty_allowed(new_intent['maker_client_id'], other['maker_client_id']):
             continue
         _refresh_intent_expiry_state(other)
-        if other.get('status') != INTENT_STATUS_OPEN:
+        if other.get('status') not in (INTENT_STATUS_OPEN, INTENT_STATUS_PARTIAL):
             continue
         if not _bucketed_candidate(new_intent, other):
             continue
-        if STORAGE_DB.find_match_by_intents(new_intent['intent_id'], other['intent_id']):
+        overlap = _compute_overlap(new_intent, other)
+        if not overlap or overlap.get('amount', 0) <= 0:
             continue
         blind_overlap = _blind_overlap_tokens_for_intents(new_intent, other)
-        overlap = _compute_overlap(new_intent, other)
-        if not overlap:
+        candidates_with_overlap.append({
+            'intent': other,
+            'overlap': overlap,
+            'blind_overlap': blind_overlap
+        })
+
+    if not candidates_with_overlap:
+        return matches
+
+    # Greedy fill with largest available counterparties first.
+    candidates_with_overlap.sort(key=lambda x: float(x['overlap'].get('amount', 0)), reverse=True)
+    selected: List[Dict[str, Any]] = []
+    remaining = maker_remaining
+    max_counterparties = max(1, int(BATCH_MAX_PARTICIPANTS) - 1)
+    for item in candidates_with_overlap:
+        if remaining <= 0 or len(selected) >= max_counterparties:
+            break
+        overlap = item['overlap']
+        alloc = min(remaining, float(overlap.get('amount', 0)))
+        if alloc <= 0:
             continue
-        matched_by_blind_tokens = bool(blind_overlap)
-        match_method = 'blind_token_overlap' if matched_by_blind_tokens else 'pair_filter'
-        match_id = generate_match_id()
-        match = {
-            'match_id': match_id,
-            'intent_sell_id': new_intent['intent_id'],
-            'intent_buy_id': other['intent_id'],
-            'overlap_min': overlap['overlap_min'],
-            'overlap_max': overlap['overlap_max'],
-            'amount': overlap['amount'],
-            'confidence': overlap['confidence'],
-            'status': MATCH_STATUS_FOUND,
-            'metadata': {
-                'base_asset': overlap['base_asset'],
-                'quote_asset': overlap['quote_asset'],
-                'participants': [new_intent['maker_client_id'], other['maker_client_id']],
-                'darkpool': True,
-                'blind_matching_enabled': bool(BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE),
-                'blind_matched': matched_by_blind_tokens,
-                'matching_method': match_method,
-                'blind_overlap_tokens': len(blind_overlap or [])
-            }
+        item['allocated'] = alloc
+        selected.append(item)
+        remaining = max(0.0, remaining - alloc)
+
+    if len(selected) + 1 < max(2, BATCH_MIN_PARTICIPANTS):
+        return matches
+    if remaining > 1e-9 and not BATCH_ALLOW_PARTIAL:
+        return matches
+
+    # Build batch match record
+    overlap_min = max([s['overlap']['overlap_min'] for s in selected] + [float(new_intent.get('price_min', 0))])
+    overlap_max = min([s['overlap']['overlap_max'] for s in selected] + [float(new_intent.get('price_max', 0))])
+    overlap_unified = overlap_min <= overlap_max
+    if not overlap_unified:
+        overlap_min = float(selected[0]['overlap']['overlap_min'])
+        overlap_max = float(selected[0]['overlap']['overlap_max'])
+    total_amount = sum(float(s.get('allocated', 0)) for s in selected)
+    match_id = generate_match_id()
+    matched_by_blind_tokens = any(bool(s.get('blind_overlap')) for s in selected)
+    match_method = 'blind_token_overlap' if matched_by_blind_tokens else 'pair_filter'
+    match = {
+        'match_id': match_id,
+        'intent_sell_id': new_intent['intent_id'],
+        'intent_buy_id': selected[0]['intent']['intent_id'] if selected else '',
+        'overlap_min': overlap_min,
+        'overlap_max': overlap_max,
+        'amount': total_amount,
+        'confidence': 1.0 if overlap_max > overlap_min else 0.6,
+        'status': MATCH_STATUS_FOUND,
+        'metadata': {
+            'base_asset': new_intent.get('sell_asset', ''),
+            'quote_asset': new_intent.get('buy_asset', ''),
+            'participants': [new_intent['maker_client_id']] + [s['intent']['maker_client_id'] for s in selected],
+            'darkpool': True,
+            'batch': True if len(selected) > 1 else False,
+            'batch_size': len(selected) + 1,
+            'batch_allocations': [
+                {
+                    'intent_id': s['intent']['intent_id'],
+                    'client_id': s['intent']['maker_client_id'],
+                    'amount': float(s.get('allocated', 0)),
+                    'overlap_min': float(s['overlap']['overlap_min']),
+                    'overlap_max': float(s['overlap']['overlap_max'])
+                } for s in selected
+            ],
+            'maker_intent_id': new_intent['intent_id'],
+            'maker_client_id': new_intent['maker_client_id'],
+            'blind_matching_enabled': bool(BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE),
+            'blind_matched': matched_by_blind_tokens,
+            'matching_method': match_method,
+            'blind_overlap_tokens': sum(len(s.get('blind_overlap') or []) for s in selected),
+            'overlap_unified': overlap_unified
         }
-        STORAGE_DB.create_match(match)
-        STORAGE_DB.update_trade_intent_status(new_intent['intent_id'], INTENT_STATUS_MATCHED)
-        STORAGE_DB.update_trade_intent_status(other['intent_id'], INTENT_STATUS_MATCHED)
-        append_audit_event(
-            'blind_match_detected' if matched_by_blind_tokens else 'match_detected',
-            new_intent['maker_client_id'],
-            match_id,
-            details={
-                'intent_a': new_intent['intent_id'],
-                'intent_b': other['intent_id'],
-                'overlap_min': overlap['overlap_min'],
-                'overlap_max': overlap['overlap_max'],
-                'matching_method': match_method,
-                'blind_overlap_tokens': len(blind_overlap or [])
-            },
-            request_id=request_id
-        )
-        matches.append(match)
+    }
+    STORAGE_DB.create_match(match)
+
+    # Store participants
+    STORAGE_DB.add_match_participant({
+        'match_id': match_id,
+        'intent_id': new_intent['intent_id'],
+        'client_id': new_intent['maker_client_id'],
+        'side': 'SELL',
+        'amount': total_amount,
+        'overlap_min': overlap_min,
+        'overlap_max': overlap_max
+    })
+    for item in selected:
+        intent = item['intent']
+        overlap = item['overlap']
+        STORAGE_DB.add_match_participant({
+            'match_id': match_id,
+            'intent_id': intent['intent_id'],
+            'client_id': intent['maker_client_id'],
+            'side': 'BUY',
+            'amount': float(item.get('allocated', 0)),
+            'overlap_min': float(overlap.get('overlap_min', 0)),
+            'overlap_max': float(overlap.get('overlap_max', 0)),
+        })
+
+    # Apply fills
+    _apply_intent_fill(new_intent['intent_id'], total_amount)
+    for item in selected:
+        _apply_intent_fill(item['intent']['intent_id'], float(item.get('allocated', 0)))
+
+    append_audit_event(
+        'blind_match_detected' if matched_by_blind_tokens else 'match_detected',
+        new_intent['maker_client_id'],
+        match_id,
+        details={
+            'intent_id': new_intent['intent_id'],
+            'batch_size': len(selected) + 1,
+            'total_amount': total_amount,
+            'matching_method': match_method,
+            'blind_overlap_tokens': sum(len(s.get('blind_overlap') or []) for s in selected)
+        },
+        request_id=request_id
+    )
+    matches.append(match)
     return matches
 
 def _ensure_match_participant(client: Dict[str, Any], match_obj: Dict[str, Any]):
     roles = client.get('roles') or []
     if 'admin' in roles:
         return
-    intent_sell = STORAGE_DB.get_trade_intent(match_obj['intent_sell_id'])
-    intent_buy = STORAGE_DB.get_trade_intent(match_obj['intent_buy_id'])
     actor = client.get('client_id', '')
-    allowed = {intent_sell.get('maker_client_id', ''), intent_buy.get('maker_client_id', '')}
+    participants = match_obj.get('participants') or STORAGE_DB.list_match_participants(match_obj.get('match_id', ''))
+    allowed = {p.get('client_id', '') for p in participants if p.get('client_id')}
+    if not allowed and match_obj.get('intent_sell_id') and match_obj.get('intent_buy_id'):
+        intent_sell = STORAGE_DB.get_trade_intent(match_obj['intent_sell_id']) or {}
+        intent_buy = STORAGE_DB.get_trade_intent(match_obj['intent_buy_id']) or {}
+        allowed = {intent_sell.get('maker_client_id', ''), intent_buy.get('maker_client_id', '')}
     if actor not in allowed:
         raise PermissionError("actor_not_allowed_for_match")
 
@@ -3581,6 +3812,7 @@ def create_trade_intent(client: Dict[str, Any], data: Dict[str, Any], request_id
 
     intent_id = generate_trade_intent_id()
     metadata = dict(data.get('metadata') or {})
+    metadata.setdefault('filled_amount', 0.0)
     metadata['wallet_attestation'] = {
         'verified': bool(intent_attestation.get('verified', False)),
         'wallet': intent_attestation.get('wallet', maker_wallet),
@@ -3656,7 +3888,7 @@ def get_trade_intent(client: Dict[str, Any], intent_id: str) -> Dict[str, Any]:
 
 def cancel_trade_intent(client: Dict[str, Any], intent_id: str, request_id: str = '') -> Dict[str, Any]:
     intent = get_trade_intent(client, intent_id)
-    if intent.get('status') not in (INTENT_STATUS_OPEN, INTENT_STATUS_MATCHED):
+    if intent.get('status') not in (INTENT_STATUS_OPEN, INTENT_STATUS_MATCHED, INTENT_STATUS_PARTIAL):
         raise ValueError("intent_not_cancellable")
     STORAGE_DB.update_trade_intent_status(intent_id, INTENT_STATUS_CANCELLED)
     append_audit_event('intent_cancelled', client['client_id'], intent_id, request_id=request_id)
@@ -3677,6 +3909,97 @@ def _generate_noise_handshake() -> Dict[str, Any]:
         'handshake_hash': base64.b64encode(os.urandom(32)).decode('ascii')
     }
 
+def _is_batch_match(match_obj: Dict[str, Any]) -> bool:
+    metadata = match_obj.get('metadata') or {}
+    participants = match_obj.get('participants') or STORAGE_DB.list_match_participants(match_obj.get('match_id', ''))
+    return bool(metadata.get('batch')) or len(participants) > 2
+
+def _match_participants(match_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    participants = match_obj.get('participants') or STORAGE_DB.list_match_participants(match_obj.get('match_id', ''))
+    return participants or []
+
+def _get_batch_secret_key() -> Tuple[bytes, int, str]:
+    key, version = KEY_PROVIDER.get_key(BATCH_SECRET_KEY_ID)
+    return key, version, BATCH_SECRET_KEY_ID
+
+def _encrypt_batch_secret(secret: str) -> Dict[str, Any]:
+    if not secret:
+        return {'ciphertext': '', 'key_id': '', 'key_version': 0}
+    if not CRYPTO_AVAILABLE:
+        return {
+            'ciphertext': base64.b64encode(secret.encode('utf-8')).decode('ascii'),
+            'key_id': 'plaintext',
+            'key_version': 0
+        }
+    key, version, key_id = _get_batch_secret_key()
+    nonce = os.urandom(12)
+    aesgcm = AESGCM(key)
+    ciphertext = aesgcm.encrypt(nonce, secret.encode('utf-8'), None)
+    blob = base64.b64encode(nonce + ciphertext).decode('ascii')
+    return {'ciphertext': blob, 'key_id': key_id, 'key_version': version}
+
+def _decrypt_batch_secret(ciphertext: str, key_id: str, key_version: int) -> str:
+    if not ciphertext:
+        return ''
+    if key_id == 'plaintext':
+        return base64.b64decode(ciphertext.encode('ascii')).decode('utf-8')
+    if not CRYPTO_AVAILABLE:
+        return ''
+    key, version = KEY_PROVIDER.get_key(key_id)
+    if version != key_version:
+        # best-effort: still try with current key material
+        pass
+    raw = base64.b64decode(ciphertext.encode('ascii'))
+    nonce = raw[:12]
+    ct = raw[12:]
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, ct, None).decode('utf-8')
+
+def _extract_batch_secret(swap: Dict[str, Any]) -> str:
+    meta = swap.get('metadata') or {}
+    enc = meta.get('batch_secret_enc', {})
+    if not isinstance(enc, dict):
+        return ''
+    return _decrypt_batch_secret(enc.get('ciphertext', ''), enc.get('key_id', ''), int(enc.get('key_version', 0)))
+
+def _is_batch_swap(swap: Dict[str, Any]) -> bool:
+    return bool((swap.get('metadata') or {}).get('batch'))
+
+def _batch_legs(swap: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return list((swap.get('metadata') or {}).get('legs') or [])
+
+def _find_leg(legs: List[Dict[str, Any]], leg_id: str) -> Optional[Dict[str, Any]]:
+    for leg in legs:
+        if leg.get('leg_id') == leg_id or leg.get('intent_id') == leg_id:
+            return leg
+    return None
+
+def _infer_leg_id_for_actor(legs: List[Dict[str, Any]], actor_id: str) -> Optional[str]:
+    owned = [leg for leg in legs if leg.get('client_id') == actor_id]
+    if len(owned) == 1:
+        return owned[0].get('leg_id')
+    return None
+
+def _batch_all_legs_state_at_least(legs: List[Dict[str, Any]], states: Tuple[str, ...]) -> bool:
+    for leg in legs:
+        if leg.get('state') not in states:
+            return False
+    return True
+
+def _compute_batch_swap_state(legs: List[Dict[str, Any]]) -> str:
+    if any(leg.get('state') == SWAP_STATE_FAILED for leg in legs):
+        return SWAP_STATE_FAILED
+    if any(leg.get('state') == SWAP_STATE_REFUNDED for leg in legs):
+        return SWAP_STATE_REFUNDED
+    if legs and all(leg.get('state') == SWAP_STATE_COMPLETED for leg in legs):
+        return SWAP_STATE_COMPLETED
+    ready_states = (SWAP_STATE_READY_CLAIM, SWAP_STATE_CLAIMED_A, SWAP_STATE_CLAIMED_B, SWAP_STATE_COMPLETED)
+    if legs and all(leg.get('state') in ready_states for leg in legs):
+        return SWAP_STATE_READY_CLAIM
+    if any(leg.get('state') in (SWAP_STATE_WAIT_LOCK_B, SWAP_STATE_READY_CLAIM, SWAP_STATE_CLAIMED_A, SWAP_STATE_CLAIMED_B) for leg in legs):
+        return SWAP_STATE_WAIT_LOCK_B
+    return SWAP_STATE_WAIT_LOCK_A
+
 def _ensure_swap_for_match(match_obj: Dict[str, Any], session: Dict[str, Any], actor: str) -> Dict[str, Any]:
     metadata = match_obj.get('metadata', {})
     existing_swap_id = metadata.get('swap_id', '')
@@ -3684,44 +4007,101 @@ def _ensure_swap_for_match(match_obj: Dict[str, Any], session: Dict[str, Any], a
         swap = STORAGE_DB.get_swap(existing_swap_id)
         if swap:
             return swap
-    secret = secrets.token_hex(32)
-    secret_hash = hashlib.sha256(secret.encode('utf-8')).hexdigest()
     now_ms = int(time.time() * 1000)
     peer_session_a = session.get('peer_a', '')
     peer_session_b = session.get('peer_b', '')
-    sell_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_sell_id', '')) or {}
-    buy_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_buy_id', '')) or {}
-    wallet_map = {
-        sell_intent.get('maker_client_id', ''): _normalize_wallet(sell_intent.get('maker_wallet', '')),
-        buy_intent.get('maker_client_id', ''): _normalize_wallet(buy_intent.get('maker_wallet', '')),
-    }
-    peer_a = actor
-    peer_b = peer_session_b if actor == peer_session_a else peer_session_a
-    if not peer_b or peer_b == peer_a:
-        peer_b = peer_session_a if peer_session_a and peer_session_a != peer_a else peer_session_b
-
-    swap = {
-        'swap_id': generate_swap_id(),
-        'match_id': match_obj['match_id'],
-        'secret_hash': secret_hash,
-        'htlc_a': {'chain': HTLC_CHAIN_A, 'status': 'pending'},
-        'htlc_b': {'chain': HTLC_CHAIN_B, 'status': 'pending'},
-        'state': SWAP_STATE_INIT,
-        'timeouts': {
-            'lock_a_timeout': now_ms + HTLC_TIMEOUT_LOCK_A_SECONDS * 1000,
-            'lock_b_timeout': now_ms + HTLC_TIMEOUT_LOCK_B_SECONDS * 1000
-        },
-        'proofs': [],
-        'metadata': {
-            'session_id': session['session_id'],
-            'initiator': actor,
-            'peer_a': peer_a,
-            'peer_b': peer_b,
-            'peer_a_wallet': wallet_map.get(peer_a, ''),
-            'peer_b_wallet': wallet_map.get(peer_b, ''),
-            'secret_hint': secret[:8] + '...'
+    if _is_batch_match(match_obj):
+        participants = _match_participants(match_obj)
+        maker_client_id = (metadata.get('maker_client_id') or '').strip()
+        if not maker_client_id:
+            sell_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_sell_id', '')) or {}
+            maker_client_id = sell_intent.get('maker_client_id', '')
+        maker_intent = None
+        for p in participants:
+            if p.get('client_id') == maker_client_id:
+                maker_intent = STORAGE_DB.get_trade_intent(p.get('intent_id', ''))
+                break
+        maker_wallet = _normalize_wallet((maker_intent or {}).get('maker_wallet', ''))
+        legs = []
+        for p in participants:
+            if p.get('client_id') == maker_client_id:
+                continue
+            counterparty_intent = STORAGE_DB.get_trade_intent(p.get('intent_id', '')) or {}
+            leg = {
+                'leg_id': p.get('intent_id', ''),
+                'intent_id': p.get('intent_id', ''),
+                'client_id': p.get('client_id', ''),
+                'amount': float(p.get('amount', 0)),
+                'overlap_min': float(p.get('overlap_min', 0)),
+                'overlap_max': float(p.get('overlap_max', 0)),
+                'state': SWAP_STATE_INIT,
+                'peer_b_wallet': _normalize_wallet(counterparty_intent.get('maker_wallet', ''))
+            }
+            legs.append(leg)
+        secret = secrets.token_hex(32)
+        secret_hash = hashlib.sha256(secret.encode('utf-8')).hexdigest()
+        secret_enc = _encrypt_batch_secret(secret)
+        swap = {
+            'swap_id': generate_swap_id(),
+            'match_id': match_obj['match_id'],
+            'secret_hash': secret_hash,
+            'htlc_a': {'chain': HTLC_CHAIN_A, 'status': 'pending', 'batch': True},
+            'htlc_b': {'chain': HTLC_CHAIN_B, 'status': 'pending', 'batch': True},
+            'state': SWAP_STATE_INIT,
+            'timeouts': {
+                'lock_a_timeout': now_ms + HTLC_TIMEOUT_LOCK_A_SECONDS * 1000,
+                'lock_b_timeout': now_ms + HTLC_TIMEOUT_LOCK_B_SECONDS * 1000
+            },
+            'proofs': [],
+            'metadata': {
+                'session_id': session['session_id'],
+                'initiator': actor,
+                'peer_a': maker_client_id,
+                'peer_a_wallet': maker_wallet,
+                'batch': True,
+                'batch_size': len(legs) + 1,
+                'legs': legs,
+                'maker_client_id': maker_client_id,
+                'maker_intent_id': (maker_intent or {}).get('intent_id', ''),
+                'batch_secret_enc': secret_enc,
+                'secret_hint': secret[:8] + '...'
+            }
         }
-    }
+    else:
+        secret = secrets.token_hex(32)
+        secret_hash = hashlib.sha256(secret.encode('utf-8')).hexdigest()
+        sell_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_sell_id', '')) or {}
+        buy_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_buy_id', '')) or {}
+        wallet_map = {
+            sell_intent.get('maker_client_id', ''): _normalize_wallet(sell_intent.get('maker_wallet', '')),
+            buy_intent.get('maker_client_id', ''): _normalize_wallet(buy_intent.get('maker_wallet', '')),
+        }
+        peer_a = actor
+        peer_b = peer_session_b if actor == peer_session_a else peer_session_a
+        if not peer_b or peer_b == peer_a:
+            peer_b = peer_session_a if peer_session_a and peer_session_a != peer_a else peer_session_b
+        swap = {
+            'swap_id': generate_swap_id(),
+            'match_id': match_obj['match_id'],
+            'secret_hash': secret_hash,
+            'htlc_a': {'chain': HTLC_CHAIN_A, 'status': 'pending'},
+            'htlc_b': {'chain': HTLC_CHAIN_B, 'status': 'pending'},
+            'state': SWAP_STATE_INIT,
+            'timeouts': {
+                'lock_a_timeout': now_ms + HTLC_TIMEOUT_LOCK_A_SECONDS * 1000,
+                'lock_b_timeout': now_ms + HTLC_TIMEOUT_LOCK_B_SECONDS * 1000
+            },
+            'proofs': [],
+            'metadata': {
+                'session_id': session['session_id'],
+                'initiator': actor,
+                'peer_a': peer_a,
+                'peer_b': peer_b,
+                'peer_a_wallet': wallet_map.get(peer_a, ''),
+                'peer_b_wallet': wallet_map.get(peer_b, ''),
+                'secret_hint': secret[:8] + '...'
+            }
+        }
     STORAGE_DB.create_swap(swap)
     match_obj['metadata']['swap_id'] = swap['swap_id']
     STORAGE_DB.update_match_status(match_obj['match_id'], MATCH_STATUS_SESSION_OPEN)
@@ -3759,7 +4139,19 @@ def start_htlc_coordination(client: Dict[str, Any], match_id: str, request_id: s
     opened = open_secure_session(client, match_id, request_id=request_id)
     swap = opened.get('swap') or {}
     if swap.get('state') == SWAP_STATE_INIT:
-        STORAGE_DB.update_swap(swap.get('swap_id', ''), state=SWAP_STATE_WAIT_LOCK_A)
+        if (swap.get('metadata') or {}).get('batch'):
+            meta = swap.get('metadata') or {}
+            legs = meta.get('legs') or []
+            for leg in legs:
+                leg['state'] = SWAP_STATE_WAIT_LOCK_A
+            meta['legs'] = legs
+            STORAGE_DB.update_swap(swap.get('swap_id', ''), state=SWAP_STATE_WAIT_LOCK_A)
+            STORAGE_DB._execute("""UPDATE swap_coordination SET metadata_json=?, updated_at=? WHERE swap_id=?"""
+                                if STORAGE_DB.backend == 'sqlite'
+                                else """UPDATE swap_coordination SET metadata_json=%s, updated_at=%s WHERE swap_id=%s""",
+                                (json.dumps(meta), int(time.time() * 1000), swap.get('swap_id', '')))
+        else:
+            STORAGE_DB.update_swap(swap.get('swap_id', ''), state=SWAP_STATE_WAIT_LOCK_A)
         swap = STORAGE_DB.get_swap(swap.get('swap_id', '')) or swap
     append_audit_event(
         'swap_init',
@@ -3808,16 +4200,38 @@ def _refresh_swap_timeout_state(swap_id: str) -> Dict[str, Any]:
     timed_out_state = _swap_timeout_expired(swap)
     if timed_out_state and swap.get('state') not in (SWAP_STATE_COMPLETED, SWAP_STATE_REFUNDED, SWAP_STATE_FAILED):
         STORAGE_DB.update_swap(swap_id, state=timed_out_state, completed_at=int(time.time() * 1000))
+        if _is_batch_swap(swap):
+            meta = swap.get('metadata') or {}
+            legs = meta.get('legs') or []
+            for leg in legs:
+                leg['state'] = timed_out_state
+            meta['legs'] = legs
+            STORAGE_DB._execute("""UPDATE swap_coordination SET metadata_json=?, updated_at=? WHERE swap_id=?"""
+                                if STORAGE_DB.backend == 'sqlite'
+                                else """UPDATE swap_coordination SET metadata_json=%s, updated_at=%s WHERE swap_id=%s""",
+                                (json.dumps(meta), int(time.time() * 1000), swap_id))
         append_audit_event('swap_timeout', 'system', swap_id, details={'to_state': timed_out_state})
         swap = STORAGE_DB.get_swap(swap_id) or swap
     return swap
 
-def _is_proof_actor_allowed(client: Dict[str, Any], swap: Dict[str, Any], proof_type: str) -> bool:
+def _is_proof_actor_allowed(client: Dict[str, Any], swap: Dict[str, Any], proof_type: str, leg_id: Optional[str] = None) -> bool:
     roles = client.get('roles') or []
     if 'admin' in roles:
         return True
     actor = client.get('client_id', '')
     metadata = swap.get('metadata', {}) or {}
+    if metadata.get('batch'):
+        legs = metadata.get('legs') or []
+        if not legs:
+            return False
+        maker_id = metadata.get('maker_client_id', '')
+        if proof_type.endswith('_a'):
+            return actor == maker_id
+        if proof_type.endswith('_b'):
+            leg_id = leg_id or _infer_leg_id_for_actor(legs, actor)
+            leg = _find_leg(legs, leg_id) if leg_id else None
+            return bool(leg and leg.get('client_id') == actor)
+        return False
     peer_a = metadata.get('peer_a', '')
     peer_b = metadata.get('peer_b', '')
     if not peer_a or not peer_b:
@@ -3830,8 +4244,16 @@ def _is_proof_actor_allowed(client: Dict[str, Any], swap: Dict[str, Any], proof_
         return actor == peer_b
     return False
 
-def _expected_wallet_for_proof(swap: Dict[str, Any], proof_type: str) -> str:
+def _expected_wallet_for_proof(swap: Dict[str, Any], proof_type: str, leg_id: Optional[str] = None) -> str:
     metadata = swap.get('metadata', {}) or {}
+    if metadata.get('batch'):
+        if proof_type.endswith('_a'):
+            return _normalize_wallet(metadata.get('peer_a_wallet', ''))
+        if proof_type.endswith('_b'):
+            legs = metadata.get('legs') or []
+            leg = _find_leg(legs, leg_id) if leg_id else None
+            return _normalize_wallet((leg or {}).get('peer_b_wallet', ''))
+        return ''
     if proof_type.endswith('_a'):
         return _normalize_wallet(metadata.get('peer_a_wallet', ''))
     if proof_type.endswith('_b'):
@@ -3845,16 +4267,27 @@ def _swap_actor_allowed(client: Dict[str, Any], swap: Dict[str, Any]) -> bool:
     match_obj = STORAGE_DB.get_match(swap['match_id'])
     if not match_obj:
         return False
-    sell_intent = STORAGE_DB.get_trade_intent(match_obj['intent_sell_id']) or {}
-    buy_intent = STORAGE_DB.get_trade_intent(match_obj['intent_buy_id']) or {}
+    participants = match_obj.get('participants') or STORAGE_DB.list_match_participants(match_obj.get('match_id', ''))
+    if participants:
+        return client.get('client_id') in {p.get('client_id', '') for p in participants}
+    sell_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_sell_id')) or {}
+    buy_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_buy_id')) or {}
     return client.get('client_id') in (sell_intent.get('maker_client_id'), buy_intent.get('maker_client_id'))
 
 def _estimate_notional_for_swap(swap: Dict[str, Any]) -> Tuple[float, str]:
     match_obj = STORAGE_DB.get_match(swap['match_id']) or {}
     metadata = match_obj.get('metadata', {})
-    overlap_mid = (float(match_obj.get('overlap_min', 0)) + float(match_obj.get('overlap_max', 0))) / 2.0
-    amount = float(match_obj.get('amount', 0))
-    notional = max(0.0, overlap_mid * amount)
+    if _is_batch_swap(swap):
+        legs = _batch_legs(swap)
+        total = 0.0
+        for leg in legs:
+            overlap_mid = (float(leg.get('overlap_min', 0)) + float(leg.get('overlap_max', 0))) / 2.0
+            total += max(0.0, overlap_mid * float(leg.get('amount', 0)))
+        notional = total
+    else:
+        overlap_mid = (float(match_obj.get('overlap_min', 0)) + float(match_obj.get('overlap_max', 0))) / 2.0
+        amount = float(match_obj.get('amount', 0))
+        notional = max(0.0, overlap_mid * amount)
     fee_asset = metadata.get('quote_asset', '')
     return notional, fee_asset
 
@@ -3886,9 +4319,21 @@ def submit_htlc_proof(client: Dict[str, Any], swap_id: str, proof: Dict[str, Any
     tx_hash = _normalize_tx_hash(str(proof.get('tx_hash', '')).strip())
     if not proof_type:
         raise ValueError("invalid_proof_type")
-    if not _is_proof_actor_allowed(client, swap, proof_type):
+    is_batch = _is_batch_swap(swap)
+    legs = _batch_legs(swap) if is_batch else []
+    leg_id = str(proof.get('leg_id', '')).strip()
+    if is_batch:
+        if not leg_id and proof_type.endswith('_b'):
+            leg_id = _infer_leg_id_for_actor(legs, client.get('client_id', '')) or ''
+        if not leg_id:
+            raise ValueError("leg_id_required")
+        leg = _find_leg(legs, leg_id)
+        if not leg:
+            raise ValueError("leg_not_found")
+        proof['leg_id'] = leg.get('leg_id', leg_id)
+    if not _is_proof_actor_allowed(client, swap, proof_type, leg_id=leg_id if is_batch else None):
         raise PermissionError("actor_not_allowed_for_proof")
-    expected_wallet = _expected_wallet_for_proof(swap, proof_type)
+    expected_wallet = _expected_wallet_for_proof(swap, proof_type, leg_id=leg_id if is_batch else None)
     signer_wallet = _normalize_wallet(proof.get('signer_wallet') or expected_wallet)
     if expected_wallet and signer_wallet and expected_wallet != signer_wallet:
         raise PermissionError("proof_signer_wallet_mismatch")
@@ -3896,6 +4341,14 @@ def submit_htlc_proof(client: Dict[str, Any], swap_id: str, proof: Dict[str, Any
         _ensure_wallet_authorized(client, signer_wallet, EVM_CHAIN_ID)
     if swap.get('state') in (SWAP_STATE_COMPLETED, SWAP_STATE_REFUNDED, SWAP_STATE_FAILED):
         raise ValueError("swap_terminal_state")
+    if is_batch and proof_type.startswith('claim'):
+        ready_states = (SWAP_STATE_READY_CLAIM, SWAP_STATE_CLAIMED_A, SWAP_STATE_CLAIMED_B, SWAP_STATE_COMPLETED)
+        if not _batch_all_legs_state_at_least(legs, ready_states):
+            raise ValueError("batch_not_ready")
+        if not proof.get('secret'):
+            secret_value = _extract_batch_secret(swap)
+            if secret_value:
+                proof['secret'] = secret_value
     if STORAGE_DB.htlc_tx_hash_exists(tx_hash):
         raise ValueError("proof_replay_detected")
     verification = _verify_htlc_proof_server_side(swap, proof)
@@ -3904,12 +4357,24 @@ def submit_htlc_proof(client: Dict[str, Any], swap_id: str, proof: Dict[str, Any
         raise ValueError("insufficient_confirmations")
     proof_attestation = _verify_htlc_proof_wallet_signature(client, swap, proof, signer_wallet)
 
-    next_state = _swap_transition(swap.get('state', SWAP_STATE_INIT), proof_type)
+    if is_batch:
+        leg_state = leg.get('state', SWAP_STATE_INIT)
+        next_leg_state = _swap_transition(leg_state, proof_type)
+        leg['state'] = next_leg_state
+        for idx, entry in enumerate(legs):
+            if entry.get('leg_id') == leg.get('leg_id'):
+                legs[idx] = leg
+                break
+        next_state = _compute_batch_swap_state(legs)
+    else:
+        next_state = _swap_transition(swap.get('state', SWAP_STATE_INIT), proof_type)
     proof['proof_type'] = proof_type
     proof['tx_hash'] = str(verification.get('tx_hash', tx_hash)).strip().lower()
     proof['confirmations'] = observed_confirmations
     proof['signer_wallet'] = signer_wallet
     proof_metadata = dict(proof.get('metadata') or {})
+    if is_batch and leg_id:
+        proof_metadata['leg_id'] = leg_id
     proof_metadata['wallet_attestation'] = {
         'verified': bool(proof_attestation.get('verified', False)),
         'wallet': proof_attestation.get('wallet', signer_wallet),
@@ -3929,6 +4394,13 @@ def submit_htlc_proof(client: Dict[str, Any], swap_id: str, proof: Dict[str, Any
 
     completed_at = int(time.time() * 1000) if next_state == SWAP_STATE_COMPLETED else None
     STORAGE_DB.update_swap(swap_id, state=next_state, completed_at=completed_at, secret_hash=secret_hash, proofs=proofs)
+    if is_batch:
+        meta = swap.get('metadata') or {}
+        meta['legs'] = legs
+        STORAGE_DB._execute("""UPDATE swap_coordination SET metadata_json=?, updated_at=? WHERE swap_id=?"""
+                            if STORAGE_DB.backend == 'sqlite'
+                            else """UPDATE swap_coordination SET metadata_json=%s, updated_at=%s WHERE swap_id=%s""",
+                            (json.dumps(meta), int(time.time() * 1000), swap_id))
     append_audit_event(
         'htlc_lock_verified' if proof_type.startswith('lock') else 'secret_revealed' if proof_type.startswith('claim') else 'swap_refunded',
         client['client_id'],
@@ -3938,7 +4410,8 @@ def submit_htlc_proof(client: Dict[str, Any], swap_id: str, proof: Dict[str, Any
             'tx_hash': proof.get('tx_hash', tx_hash),
             'confirmations': observed_confirmations,
             'proof_verifier': verification.get('verifier', 'client_declared'),
-            'wallet_attested': bool(proof_attestation.get('verified', False))
+            'wallet_attested': bool(proof_attestation.get('verified', False)),
+            'leg_id': leg_id if is_batch else ''
         },
         request_id=request_id
     )
@@ -3958,6 +4431,13 @@ def get_swap_status(client: Dict[str, Any], swap_id: str) -> Dict[str, Any]:
         raise PermissionError("actor_not_allowed_for_swap")
     swap['proofs'] = STORAGE_DB.list_htlc_proofs(swap_id)
     swap['fee_invoice'] = STORAGE_DB.get_latest_fee_invoice(swap_id)
+    if _is_batch_swap(swap):
+        legs = _batch_legs(swap)
+        ready_states = (SWAP_STATE_READY_CLAIM, SWAP_STATE_CLAIMED_A, SWAP_STATE_CLAIMED_B, SWAP_STATE_COMPLETED)
+        batch_ready = _batch_all_legs_state_at_least(legs, ready_states)
+        swap['batch_ready'] = batch_ready
+        if batch_ready:
+            swap['batch_secret'] = _extract_batch_secret(swap)
     return swap
 
 def issue_fee_invoice(client: Dict[str, Any], swap_id: str, request_id: str = '') -> Dict[str, Any]:
@@ -5503,25 +5983,30 @@ def _simple_cli_actor(actor_ctx: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     return client_id, _cli_otc_client(client_id)
 
 def _summarize_match_for_client(client_id: str, match_obj: Dict[str, Any]) -> Dict[str, Any]:
-    sell_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_sell_id', '')) or {}
-    buy_intent = STORAGE_DB.get_trade_intent(match_obj.get('intent_buy_id', '')) or {}
-    seller_id = sell_intent.get('maker_client_id', '')
-    buyer_id = buy_intent.get('maker_client_id', '')
-    actor_side = 'seller' if client_id == seller_id else 'buyer' if client_id == buyer_id else 'observer'
-    actor_intent = sell_intent if actor_side == 'seller' else buy_intent if actor_side == 'buyer' else {}
-    counterparty_id = buyer_id if actor_side == 'seller' else seller_id if actor_side == 'buyer' else ''
-    suggested_price = round((float(match_obj.get('overlap_min', 0)) + float(match_obj.get('overlap_max', 0))) / 2.0, 8)
+    participants = match_obj.get('participants') or STORAGE_DB.list_match_participants(match_obj.get('match_id', ''))
+    actor_part = next((p for p in participants if p.get('client_id') == client_id), None)
+    actor_intent = STORAGE_DB.get_trade_intent(actor_part.get('intent_id', '')) if actor_part else {}
+    actor_side = 'seller' if actor_part and str(actor_part.get('side', '')).upper() == 'SELL' else 'buyer' if actor_part else 'observer'
+    counterparties = [p.get('client_id') for p in participants if p.get('client_id') and p.get('client_id') != client_id]
+    counterparty_label = ''
+    if counterparties:
+        counterparty_label = counterparties[0] if len(counterparties) == 1 else f"{len(counterparties)} counterparties"
+    overlap_min = float(actor_part.get('overlap_min', match_obj.get('overlap_min', 0))) if actor_part else float(match_obj.get('overlap_min', 0))
+    overlap_max = float(actor_part.get('overlap_max', match_obj.get('overlap_max', 0))) if actor_part else float(match_obj.get('overlap_max', 0))
+    suggested_price = round((overlap_min + overlap_max) / 2.0, 8) if overlap_max > 0 else 0.0
     return {
         'match_id': match_obj.get('match_id', ''),
         'status': match_obj.get('status', ''),
         'you_side': actor_side.upper(),
-        'counterparty_client_id': counterparty_id,
+        'counterparty_client_id': counterparty_label,
         'you_sell_asset': actor_intent.get('sell_asset', ''),
         'you_buy_asset': actor_intent.get('buy_asset', ''),
-        'you_amount': actor_intent.get('amount', 0),
-        'overlap_min': match_obj.get('overlap_min', 0),
-        'overlap_max': match_obj.get('overlap_max', 0),
+        'you_amount': float(actor_part.get('amount', actor_intent.get('amount', 0))) if actor_part else actor_intent.get('amount', 0),
+        'overlap_min': overlap_min,
+        'overlap_max': overlap_max,
         'suggested_price': suggested_price,
+        'batch': bool((match_obj.get('metadata') or {}).get('batch', False)),
+        'batch_size': int((match_obj.get('metadata') or {}).get('batch_size', len(participants) or 0)),
     }
 
 class SimpleCLIAdapter:
@@ -5602,7 +6087,12 @@ class SimpleCLIAdapter:
         client_id, _ = _simple_cli_actor(actor_ctx)
         intents = STORAGE_DB.list_trade_intents_for_client(client_id, limit=100)
         matches = STORAGE_DB.list_matches_for_client(client_id, limit=100)
-        swaps = _list_swaps_for_client(client_id, limit=200)
+        swaps = []
+        for s in _list_swaps_for_client(client_id, limit=200):
+            try:
+                swaps.append(get_swap_status(_cli_otc_client(client_id), s.get('swap_id', '')))
+            except Exception:
+                swaps.append(s)
         invoices = {}
         for swap in swaps:
             sid = swap.get('swap_id', '')
@@ -5863,6 +6353,7 @@ def cli_submit_htlc_proof():
     client_id = input('Actor client ID: ').strip()
     swap_id = input('Swap ID: ').strip()
     proof_type = input('Proof type (lock_a/lock_b/claim_a/claim_b/refund_a/refund_b): ').strip()
+    leg_id = input('Leg ID (optional, required for batch): ').strip()
     tx_hash = input('Tx hash: ').strip()
     confirmations = int(input('Confirmations: ').strip() or '0')
     secret = input('Secret (optional): ').strip() or None
@@ -5876,11 +6367,12 @@ def cli_submit_htlc_proof():
         'secret': secret,
         'signer_wallet': signer_wallet or None,
         'wallet_nonce': wallet_nonce,
+        'leg_id': leg_id or None,
         'metadata': {}
     }
     if PROOF_WALLET_ATTESTATION_REQUIRED:
         swap_obj = get_swap_status(client_obj, swap_id)
-        prepared = prepare_htlc_proof_signature(client_obj, swap_obj, payload, _normalize_wallet(signer_wallet or _expected_wallet_for_proof(swap_obj, proof_type)))
+        prepared = prepare_htlc_proof_signature(client_obj, swap_obj, payload, _normalize_wallet(signer_wallet or _expected_wallet_for_proof(swap_obj, proof_type, leg_id=leg_id)))
         auto_signature = ''
         try:
             auto_signature = _sign_message_with_env_wallet(prepared['message'], prepared.get('wallet', ''))
@@ -5970,7 +6462,7 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
 
     if intent:
         status = str(intent.get('status', ''))
-        if status == INTENT_STATUS_OPEN:
+        if status in (INTENT_STATUS_OPEN, INTENT_STATUS_PARTIAL):
             actions.append(_action_def(
                 'VIEW_INTENT_STATUS',
                 'Monitor open intent',
@@ -6014,40 +6506,84 @@ def compute_next_actions(intent: Optional[Dict[str, Any]] = None,
         swap_id = swap.get('swap_id', '')
         state = str(swap.get('state', ''))
         metadata = swap.get('metadata') or {}
-        peer_a = str(metadata.get('peer_a', '')).strip()
-        peer_b = str(metadata.get('peer_b', '')).strip()
+        if metadata.get('batch'):
+            legs = metadata.get('legs') or []
+            maker_id = str(metadata.get('maker_client_id', '')).strip()
 
-        def allowed(target_peer: str) -> bool:
-            return not actor or not target_peer or actor == target_peer
+            def allowed(target_peer: str) -> bool:
+                return not actor or not target_peer or actor == target_peer
 
-        if state in (SWAP_STATE_INIT, SWAP_STATE_WAIT_LOCK_A):
-            if allowed(peer_a):
-                actions.append(_action_def('SEND_LOCK_A', 'Submit lock_a proof', 10, {'swap_id': swap_id, 'proof_type': 'lock_a'}))
-        if state == SWAP_STATE_WAIT_LOCK_B:
-            if allowed(peer_b):
-                actions.append(_action_def('SEND_LOCK_B', 'Submit lock_b proof', 11, {'swap_id': swap_id, 'proof_type': 'lock_b'}))
-            if allowed(peer_a):
-                actions.append(_action_def('REFUND_A', 'Execute refund_a', 80, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
-            if allowed(peer_b):
-                actions.append(_action_def('REFUND_B', 'Execute refund_b', 81, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
-        if state == SWAP_STATE_READY_CLAIM:
-            if allowed(peer_a):
-                actions.append(_action_def('SEND_CLAIM_A', 'Submit claim_a proof', 12, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
-            if allowed(peer_b):
-                actions.append(_action_def('SEND_CLAIM_B', 'Submit claim_b proof', 13, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
-            if allowed(peer_a):
-                actions.append(_action_def('REFUND_A', 'Execute refund_a', 82, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
-            if allowed(peer_b):
-                actions.append(_action_def('REFUND_B', 'Execute refund_b', 83, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
-        if state == SWAP_STATE_CLAIMED_A and allowed(peer_b):
-            actions.append(_action_def('SEND_CLAIM_B', 'Submit claim_b proof', 14, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
-        if state == SWAP_STATE_CLAIMED_B and allowed(peer_a):
-            actions.append(_action_def('SEND_CLAIM_A', 'Submit claim_a proof', 14, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
-        if state == SWAP_STATE_COMPLETED:
-            if not fee_invoice:
-                actions.append(_action_def('ISSUE_FEE', 'Issue fee invoice', 30, {'swap_id': swap_id}, risky=False, auto=True))
-            elif str(fee_invoice.get('payment_status', 'pending')).lower() != 'paid':
-                actions.append(_action_def('CONFIRM_FEE', 'Confirm fee payment', 40, {'swap_id': swap_id}, risky=True, auto=False))
+            for leg in legs:
+                leg_id = leg.get('leg_id', '')
+                counterparty = str(leg.get('client_id', '')).strip()
+                leg_state = str(leg.get('state', SWAP_STATE_INIT))
+                if leg_state in (SWAP_STATE_INIT, SWAP_STATE_WAIT_LOCK_A):
+                    if allowed(maker_id):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'lock_a', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('SEND_LOCK_A', f"Submit lock_a proof (leg {leg_id})", 10, ctx))
+                if leg_state == SWAP_STATE_WAIT_LOCK_B:
+                    if allowed(counterparty):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'lock_b', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('SEND_LOCK_B', f"Submit lock_b proof (leg {leg_id})", 11, ctx))
+                    if allowed(maker_id):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'refund_a', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('REFUND_A', f"Execute refund_a (leg {leg_id})", 80, ctx, risky=True, auto=False))
+                    if allowed(counterparty):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'refund_b', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('REFUND_B', f"Execute refund_b (leg {leg_id})", 81, ctx, risky=True, auto=False))
+                if state == SWAP_STATE_READY_CLAIM and leg_state in (SWAP_STATE_READY_CLAIM, SWAP_STATE_CLAIMED_A, SWAP_STATE_CLAIMED_B):
+                    if allowed(maker_id):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'claim_a', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('SEND_CLAIM_A', f"Submit claim_a proof (leg {leg_id})", 12, ctx, risky=True, auto=False))
+                    if allowed(counterparty):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'claim_b', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('SEND_CLAIM_B', f"Submit claim_b proof (leg {leg_id})", 13, ctx, risky=True, auto=False))
+                    if allowed(maker_id):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'refund_a', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('REFUND_A', f"Execute refund_a (leg {leg_id})", 82, ctx, risky=True, auto=False))
+                    if allowed(counterparty):
+                        ctx = {'swap_id': swap_id, 'proof_type': 'refund_b', 'leg_id': leg_id, 'counterparty': counterparty}
+                        actions.append(_action_def('REFUND_B', f"Execute refund_b (leg {leg_id})", 83, ctx, risky=True, auto=False))
+            if state == SWAP_STATE_COMPLETED:
+                if not fee_invoice:
+                    actions.append(_action_def('ISSUE_FEE', 'Issue fee invoice', 30, {'swap_id': swap_id}, risky=False, auto=True))
+                elif str(fee_invoice.get('payment_status', 'pending')).lower() != 'paid':
+                    actions.append(_action_def('CONFIRM_FEE', 'Confirm fee payment', 40, {'swap_id': swap_id}, risky=True, auto=False))
+        else:
+            peer_a = str(metadata.get('peer_a', '')).strip()
+            peer_b = str(metadata.get('peer_b', '')).strip()
+
+            def allowed(target_peer: str) -> bool:
+                return not actor or not target_peer or actor == target_peer
+
+            if state in (SWAP_STATE_INIT, SWAP_STATE_WAIT_LOCK_A):
+                if allowed(peer_a):
+                    actions.append(_action_def('SEND_LOCK_A', 'Submit lock_a proof', 10, {'swap_id': swap_id, 'proof_type': 'lock_a'}))
+            if state == SWAP_STATE_WAIT_LOCK_B:
+                if allowed(peer_b):
+                    actions.append(_action_def('SEND_LOCK_B', 'Submit lock_b proof', 11, {'swap_id': swap_id, 'proof_type': 'lock_b'}))
+                if allowed(peer_a):
+                    actions.append(_action_def('REFUND_A', 'Execute refund_a', 80, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
+                if allowed(peer_b):
+                    actions.append(_action_def('REFUND_B', 'Execute refund_b', 81, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
+            if state == SWAP_STATE_READY_CLAIM:
+                if allowed(peer_a):
+                    actions.append(_action_def('SEND_CLAIM_A', 'Submit claim_a proof', 12, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
+                if allowed(peer_b):
+                    actions.append(_action_def('SEND_CLAIM_B', 'Submit claim_b proof', 13, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
+                if allowed(peer_a):
+                    actions.append(_action_def('REFUND_A', 'Execute refund_a', 82, {'swap_id': swap_id, 'proof_type': 'refund_a'}, risky=True, auto=False))
+                if allowed(peer_b):
+                    actions.append(_action_def('REFUND_B', 'Execute refund_b', 83, {'swap_id': swap_id, 'proof_type': 'refund_b'}, risky=True, auto=False))
+            if state == SWAP_STATE_CLAIMED_A and allowed(peer_b):
+                actions.append(_action_def('SEND_CLAIM_B', 'Submit claim_b proof', 14, {'swap_id': swap_id, 'proof_type': 'claim_b'}, risky=True, auto=False))
+            if state == SWAP_STATE_CLAIMED_B and allowed(peer_a):
+                actions.append(_action_def('SEND_CLAIM_A', 'Submit claim_a proof', 14, {'swap_id': swap_id, 'proof_type': 'claim_a'}, risky=True, auto=False))
+            if state == SWAP_STATE_COMPLETED:
+                if not fee_invoice:
+                    actions.append(_action_def('ISSUE_FEE', 'Issue fee invoice', 30, {'swap_id': swap_id}, risky=False, auto=True))
+                elif str(fee_invoice.get('payment_status', 'pending')).lower() != 'paid':
+                    actions.append(_action_def('CONFIRM_FEE', 'Confirm fee payment', 40, {'swap_id': swap_id}, risky=True, auto=False))
 
     actions.sort(key=lambda x: x['priority'])
     return actions
@@ -6083,10 +6619,8 @@ def _list_swaps_for_client(client_id: str, limit: int = 100) -> List[Dict[str, A
         query = """
             SELECT s.swap_id
             FROM swap_coordination s
-            JOIN matches m ON m.match_id = s.match_id
-            JOIN trade_intents a ON a.intent_id = m.intent_sell_id
-            JOIN trade_intents b ON b.intent_id = m.intent_buy_id
-            WHERE a.maker_client_id=? OR b.maker_client_id=?
+            JOIN match_participants mp ON mp.match_id = s.match_id
+            WHERE mp.client_id=?
             ORDER BY s.updated_at DESC
             LIMIT ?
         """
@@ -6094,15 +6628,38 @@ def _list_swaps_for_client(client_id: str, limit: int = 100) -> List[Dict[str, A
         query = """
             SELECT s.swap_id
             FROM swap_coordination s
-            JOIN matches m ON m.match_id = s.match_id
-            JOIN trade_intents a ON a.intent_id = m.intent_sell_id
-            JOIN trade_intents b ON b.intent_id = m.intent_buy_id
-            WHERE a.maker_client_id=%s OR b.maker_client_id=%s
+            JOIN match_participants mp ON mp.match_id = s.match_id
+            WHERE mp.client_id=%s
             ORDER BY s.updated_at DESC
             LIMIT %s
         """
-    cur = STORAGE_DB._execute(query, (client_id, client_id, limit))
+    cur = STORAGE_DB._execute(query, (client_id, limit))
     rows = cur.fetchall() if cur else []
+    if not rows:
+        if STORAGE_DB.backend == 'sqlite':
+            legacy_query = """
+                SELECT s.swap_id
+                FROM swap_coordination s
+                JOIN matches m ON m.match_id = s.match_id
+                JOIN trade_intents a ON a.intent_id = m.intent_sell_id
+                JOIN trade_intents b ON b.intent_id = m.intent_buy_id
+                WHERE a.maker_client_id=? OR b.maker_client_id=?
+                ORDER BY s.updated_at DESC
+                LIMIT ?
+            """
+        else:
+            legacy_query = """
+                SELECT s.swap_id
+                FROM swap_coordination s
+                JOIN matches m ON m.match_id = s.match_id
+                JOIN trade_intents a ON a.intent_id = m.intent_sell_id
+                JOIN trade_intents b ON b.intent_id = m.intent_buy_id
+                WHERE a.maker_client_id=%s OR b.maker_client_id=%s
+                ORDER BY s.updated_at DESC
+                LIMIT %s
+            """
+        cur = STORAGE_DB._execute(legacy_query, (client_id, client_id, limit))
+        rows = cur.fetchall() if cur else []
     out: List[Dict[str, Any]] = []
     for row in rows:
         swap = _refresh_swap_timeout_state(row[0]) or STORAGE_DB.get_swap(row[0])
@@ -6110,7 +6667,7 @@ def _list_swaps_for_client(client_id: str, limit: int = 100) -> List[Dict[str, A
             out.append(swap)
     return out
 
-def _submit_htlc_proof_interactive(client_id: str, swap_id: str, proof_type: str, source: str) -> Optional[Dict[str, Any]]:
+def _submit_htlc_proof_interactive(client_id: str, swap_id: str, proof_type: str, source: str, leg_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     print(f"\n[ACTION] {proof_type} | swap={swap_id}")
     tx_hash = input('Tx hash: ').strip()
     confirmations = int(input(f'Confirmations [{HTLC_MIN_CONFIRMATIONS}]: ').strip() or str(HTLC_MIN_CONFIRMATIONS))
@@ -6127,11 +6684,12 @@ def _submit_htlc_proof_interactive(client_id: str, swap_id: str, proof_type: str
         'secret': secret,
         'signer_wallet': signer_wallet or None,
         'wallet_nonce': wallet_nonce,
+        'leg_id': leg_id or None,
         'metadata': {'cli_source': source, 'operation': proof_type}
     }
     if PROOF_WALLET_ATTESTATION_REQUIRED:
         swap_obj = get_swap_status(client_obj, swap_id)
-        expected_wallet = _normalize_wallet(signer_wallet or _expected_wallet_for_proof(swap_obj, proof_type))
+        expected_wallet = _normalize_wallet(signer_wallet or _expected_wallet_for_proof(swap_obj, proof_type, leg_id=leg_id))
         prepared = prepare_htlc_proof_signature(client_obj, swap_obj, payload, expected_wallet)
         auto_signature = ''
         try:
@@ -6168,9 +6726,10 @@ def _execute_next_action(client_id: str, action: Dict[str, Any], source: str) ->
         if code.startswith('SEND_') or code.startswith('REFUND_'):
             swap_id = ctx.get('swap_id', '')
             proof_type = ctx.get('proof_type', '')
+            leg_id = ctx.get('leg_id', None)
             if action.get('risky') and input(f"Confirm risky action {proof_type} on swap {swap_id}? (y/n): ").strip().lower() != 'y':
                 return False
-            result = _submit_htlc_proof_interactive(client_id, swap_id, proof_type, source=source)
+            result = _submit_htlc_proof_interactive(client_id, swap_id, proof_type, source=source, leg_id=leg_id)
             if result:
                 print(f"[OK] Swap state: {result.get('swap', {}).get('state', '')}")
             return True
@@ -6814,6 +7373,9 @@ async def start_rest_api():
             'invalid_swap_transition': 409,
             'swap_terminal_state': 409,
             'swap_not_completed': 409,
+            'leg_id_required': 400,
+            'leg_not_found': 404,
+            'batch_not_ready': 409,
             'insufficient_confirmations': 409,
             'secret_hash_mismatch': 409,
             'invalid_proof_type': 400,
@@ -7316,9 +7878,10 @@ async def start_rest_api():
         if not _swap_actor_allowed(request['client'], swap):
             return json_error(request, 403, 'actor_not_allowed_for_swap', 'actor_not_allowed_for_swap')
         proof_type = str(data.get('proof_type', '')).strip()
-        if proof_type and not _is_proof_actor_allowed(request['client'], swap, proof_type):
+        leg_id = str(data.get('leg_id', '')).strip()
+        if proof_type and not _is_proof_actor_allowed(request['client'], swap, proof_type, leg_id=leg_id or None):
             return json_error(request, 403, 'actor_not_allowed_for_proof', 'actor_not_allowed_for_proof')
-        signer_wallet = _normalize_wallet(data.get('signer_wallet') or _expected_wallet_for_proof(swap, proof_type))
+        signer_wallet = _normalize_wallet(data.get('signer_wallet') or _expected_wallet_for_proof(swap, proof_type, leg_id=leg_id or None))
         if signer_wallet:
             try:
                 _ensure_wallet_authorized(request['client'], signer_wallet, EVM_CHAIN_ID)

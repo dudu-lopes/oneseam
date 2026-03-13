@@ -85,7 +85,18 @@ def _friendly_action_label(action: dict[str, Any]) -> str:
         'ISSUE_FEE': 'Generate service fee invoice',
         'CONFIRM_FEE': 'Confirm service fee payment',
     }
-    return labels.get(code, str(action.get('label', 'Action')).strip())
+    base = labels.get(code, str(action.get('label', 'Action')).strip())
+    ctx = action.get('context') or {}
+    leg_id = ctx.get('leg_id') or ''
+    counterparty = ctx.get('counterparty') or ''
+    extras = []
+    if leg_id:
+        extras.append(f"leg {_short_id(str(leg_id))}")
+    if counterparty:
+        extras.append(f"with {counterparty}")
+    if extras:
+        return f"{base} ({', '.join(extras)})"
+    return base
 
 
 def _status_banner() -> None:
@@ -201,6 +212,9 @@ def _guided_swap_loop(
         state = str(swap.get('state', ''))
         print(f"Swap status: {state}")
         print(_swap_state_hint(state))
+        if swap.get('batch_secret'):
+            print('Shared secret ready for claims (batch):')
+            print(swap.get('batch_secret'))
         if fee_invoice:
             print(f"Fee: {fee_invoice.get('fee_amount','')} {fee_invoice.get('fee_asset','')} | status={fee_invoice.get('payment_status','')}")
 
@@ -255,7 +269,7 @@ def _my_orders_flow(adapter: Any, cli_state: dict[str, Any]):
     terminal_intent_statuses = {'CANCELLED', 'EXPIRED', 'SETTLED', 'COMPLETED'}
     active_intents = [x for x in intents if str(x.get('status', '')).upper() not in terminal_intent_statuses]
     print(f"Active orders: {len(active_intents)} | Matches: {len(matches)} | Swaps: {len(swaps)}")
-    print('Order ID = your order | Match ID = compatible pair | Swap ID = active execution')
+    print('Order ID = your order | Match ID = compatible batch | Swap ID = active execution')
     print('\nOpen orders:')
     if not active_intents:
         print('  none')
@@ -267,7 +281,10 @@ def _my_orders_flow(adapter: Any, cli_state: dict[str, Any]):
     if not matches:
         print('  none')
     for idx, item in enumerate(matches[:MAX_LIST_ITEMS], start=1):
-        print(f"  [{idx}] {_short_id(item.get('match_id',''))} | {item.get('you_sell_asset','')}->{item.get('you_buy_asset','')} | {item.get('readiness','')}")
+        batch_hint = ''
+        if item.get('batch'):
+            batch_hint = f" | batch={item.get('batch_size', '')}"
+        print(f"  [{idx}] {_short_id(item.get('match_id',''))} | {item.get('you_sell_asset','')}->{item.get('you_buy_asset','')} | {item.get('readiness','')}{batch_hint}")
 
     seen_matches = cli_state.setdefault('seen_matches', {})
     previous = set(seen_matches.get(client_id, []))

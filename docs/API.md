@@ -19,6 +19,8 @@ Base path: `/v2`
 - `POST /v2/swaps/{swap_id}/htlc/proof/prepare-signature`
 - `POST /v2/swaps/{swap_id}/htlc/proof`
 - `GET /v2/swaps/{swap_id}`
+Notes:
+- Batch swaps use a shared preimage; include `leg_id` in proof payloads for batch legs.
 
 ## Fee
 - `POST /v2/swaps/{swap_id}/fee/invoice`

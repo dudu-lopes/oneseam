@@ -13,6 +13,7 @@ The platform does not custody funds and does not sign end-user transactions on t
 ## Competitive Differentiators
 - **Intent dark-pool model:** no public order book and no single node can reconstruct a full order.
 - **Bitcoin-native settlement:** BTC + Lightning first, with HTLC coordination and wallet-to-wallet execution.
+- **Batch matching with shared preimage:** fragmented fills across multiple counterparties settle atomically.
 - **Non-custodial by design:** the platform never holds funds or signs transactions.
 - **Privacy-first matching:** blind commitments and bucketed overlap detection reduce information leakage.
 - **Auditability without disclosure:** immutable audit chain for actions without exposing private order data.
