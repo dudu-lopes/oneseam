@@ -71,6 +71,7 @@ python oneseam.py api
 - Set `legacy_otc_api_enabled: false`.
 - Use TLS/mTLS and JWT-only auth (`allow_legacy_api_keys: false`).
 - Never commit private keys, tokens, or production certificates.
+ - `batch_allow_partial: true` enables partial fills when full liquidity is not available.
 
 ## License
 ONESEAM is source-available software released under the Business Source License 1.1 (BSL 1.1).
