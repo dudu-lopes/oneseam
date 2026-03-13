@@ -3654,12 +3654,28 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
     if not candidates_with_overlap:
         return matches
 
+    selected_pool = candidates_with_overlap
+    selected_blind_token = ''
+    if BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE:
+        token_map: Dict[str, Dict[str, Any]] = {}
+        for item in candidates_with_overlap:
+            tokens = item.get('blind_overlap') or []
+            intent_id = item['intent'].get('intent_id', '')
+            for token in tokens:
+                entry = token_map.setdefault(str(token), {'items': {}, 'amount': 0.0})
+                if intent_id not in entry['items']:
+                    entry['items'][intent_id] = item
+                    entry['amount'] += float(item['overlap'].get('amount', 0))
+        if token_map:
+            selected_blind_token = max(token_map.keys(), key=lambda k: float(token_map[k]['amount']))
+            selected_pool = list(token_map[selected_blind_token]['items'].values())
+
     # Greedy fill with largest available counterparties first.
-    candidates_with_overlap.sort(key=lambda x: float(x['overlap'].get('amount', 0)), reverse=True)
+    selected_pool.sort(key=lambda x: float(x['overlap'].get('amount', 0)), reverse=True)
     selected: List[Dict[str, Any]] = []
     remaining = maker_remaining
     max_counterparties = max(1, int(BATCH_MAX_PARTICIPANTS) - 1)
-    for item in candidates_with_overlap:
+    for item in selected_pool:
         if remaining <= 0 or len(selected) >= max_counterparties:
             break
         overlap = item['overlap']
@@ -3717,6 +3733,7 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
             'blind_matched': matched_by_blind_tokens,
             'matching_method': match_method,
             'blind_overlap_tokens': sum(len(s.get('blind_overlap') or []) for s in selected),
+            'blind_slot_token': selected_blind_token,
             'overlap_unified': overlap_unified
         }
     }
@@ -3759,7 +3776,8 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
             'batch_size': len(selected) + 1,
             'total_amount': total_amount,
             'matching_method': match_method,
-            'blind_overlap_tokens': sum(len(s.get('blind_overlap') or []) for s in selected)
+            'blind_overlap_tokens': sum(len(s.get('blind_overlap') or []) for s in selected),
+            'blind_slot_token': selected_blind_token
         },
         request_id=request_id
     )
