@@ -16,6 +16,7 @@ The platform does not custody funds and does not sign end-user transactions on t
 - **Batch matching with shared preimage:** fragmented fills across multiple counterparties settle atomically.
 - **Non-custodial by design:** the platform never holds funds or signs transactions.
 - **Privacy-first matching:** blind commitments and bucketed overlap detection reduce information leakage.
+- **DHT intent discovery:** slot-indexed commitments enable private discovery without exposing full orders.
 - **Auditability without disclosure:** immutable audit chain for actions without exposing private order data.
 
 ## Quick Start
@@ -39,6 +40,12 @@ python oneseam.py api
 - `2. My Orders` (active orders + match notifications + match confirmation)
 - `3. Exit`
 - `0. Node Status`
+
+## DHT Intent Discovery (Blind Slot Index)
+ONESEAM uses a dedicated DHT layer for **intent discovery only**. Each intent is converted into a blind commitment
+and indexed by **slot tokens** (price bucket + amount bucket + side). Nodes query the DHT by slot keys and receive
+only the **commitment id + holder node**, then fetch shards/manifests to verify overlap privately.
+This preserves dark-pool privacy while improving discovery across the network.
 
 ## API v2
 - `POST /v2/intents/prepare-signature`
