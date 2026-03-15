@@ -165,3 +165,21 @@ log_json: true
 log_level: "INFO"    # DEBUG | INFO | WARN | ERROR
 neighbor_ttl_seconds: 60
 metrics_enabled: true
+
+# DHT discovery (peer discovery only)
+dht_enabled: true
+dht_query_ttl: 3
+dht_fanout: 3
+dht_max_results: 20
+dht_query_timeout_seconds: 4
+dht_seen_ttl_seconds: 60
+dht_refresh_interval_seconds: 30
+
+# DHT intent discovery (blind slot indexing)
+dht_intent_enabled: true
+dht_intent_replication_k: 3
+dht_intent_query_ttl: 3
+dht_intent_fanout: 3
+dht_intent_query_timeout_seconds: 4
+dht_intent_seen_ttl_seconds: 60
+dht_intent_cleanup_interval_seconds: 30

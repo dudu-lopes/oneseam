@@ -171,6 +171,50 @@ if PYDANTIC_AVAILABLE:
         served_destinations: List[str] = Field(default_factory=list)
         node_signing_pub: Optional[str] = ''
 
+    class P2PDHTQuery(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['DHT_QUERY']
+        query_id: str
+        origin_id: str
+        target_id: str
+        ttl: int
+        visited: List[str] = Field(default_factory=list)
+        max_results: int = 20
+
+    class P2PDHTResponse(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['DHT_RESPONSE']
+        status: Literal['OK', 'DUPLICATE', 'ERROR']
+        query_id: str
+        nodes: List[Dict[str, Any]] = Field(default_factory=list)
+
+    class P2PDHTIntentStore(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['DHT_STORE_INTENT']
+        key: str
+        commitment_id: str
+        holder_node_id: str
+        holder_ip: Optional[str] = ''
+        holder_port: int
+        expires_at: int
+
+    class P2PDHTIntentFind(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['DHT_FIND_INTENT']
+        query_id: str
+        origin_id: str
+        key: str
+        ttl: int
+        visited: List[str] = Field(default_factory=list)
+        max_results: int = 50
+
+    class P2PDHTIntentResponse(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        cmd: Literal['DHT_INTENT_RESPONSE']
+        status: Literal['OK', 'DUPLICATE', 'ERROR']
+        query_id: str
+        records: List[Dict[str, Any]] = Field(default_factory=list)
+
     class WalletBindRequest(BaseModel):
         model_config = ConfigDict(extra='forbid')
         wallet_address: str
@@ -379,6 +423,20 @@ LOG_FILE = _config('log_file', '')
 LOG_JSON = _as_bool(_config('log_json', True))
 LOG_LEVEL = _config('log_level', 'INFO')
 NEIGHBOR_TTL_SECONDS = _config('neighbor_ttl_seconds', 60)
+DHT_ENABLED = _as_bool(_config('dht_enabled', True))
+DHT_QUERY_TTL = int(_config('dht_query_ttl', 3))
+DHT_FANOUT = int(_config('dht_fanout', 3))
+DHT_MAX_RESULTS = int(_config('dht_max_results', 20))
+DHT_QUERY_TIMEOUT_SECONDS = float(_config('dht_query_timeout_seconds', 4.0))
+DHT_SEEN_TTL_SECONDS = int(_config('dht_seen_ttl_seconds', 60))
+DHT_REFRESH_INTERVAL_SECONDS = int(_config('dht_refresh_interval_seconds', 30))
+DHT_INTENT_ENABLED = _as_bool(_config('dht_intent_enabled', True))
+DHT_INTENT_REPLICATION_K = int(_config('dht_intent_replication_k', 3))
+DHT_INTENT_QUERY_TTL = int(_config('dht_intent_query_ttl', 3))
+DHT_INTENT_FANOUT = int(_config('dht_intent_fanout', 3))
+DHT_INTENT_QUERY_TIMEOUT_SECONDS = float(_config('dht_intent_query_timeout_seconds', 4.0))
+DHT_INTENT_SEEN_TTL_SECONDS = int(_config('dht_intent_seen_ttl_seconds', 60))
+DHT_INTENT_CLEANUP_INTERVAL_SECONDS = int(_config('dht_intent_cleanup_interval_seconds', 30))
 METRICS_ENABLED = _as_bool(_config('metrics_enabled', True))
 DEFAULT_QUORUM_K = _config('quorum_k', 2)
 DEFAULT_QUORUM_N = _config('quorum_n', 3)
@@ -456,6 +514,11 @@ CMD_STORE_MANIFEST = 'STORE_MANIFEST'
 CMD_FETCH_SHARD = 'FETCH_SHARD'
 CMD_FETCH_MANIFEST = 'FETCH_MANIFEST'
 CMD_HEALTH_CHECK = 'HEALTH_CHECK'
+CMD_DHT_QUERY = 'DHT_QUERY'
+CMD_DHT_RESPONSE = 'DHT_RESPONSE'
+CMD_DHT_STORE_INTENT = 'DHT_STORE_INTENT'
+CMD_DHT_FIND_INTENT = 'DHT_FIND_INTENT'
+CMD_DHT_INTENT_RESPONSE = 'DHT_INTENT_RESPONSE'
 APP_VERSION = '3.2.0'
 
 # OTC states
@@ -525,6 +588,10 @@ SWAP_STATE_FAILED = 'FAILED'
 node_id = None
 neighbors = {}
 neighbors_lock = threading.Lock()
+dht_seen_queries = {}
+dht_seen_lock = threading.Lock()
+dht_intent_seen_queries = {}
+dht_intent_seen_lock = threading.Lock()
 QUIET_MODE = True  # Set to True to suppress RELAY logs
 ASYNC_LOOP = None
 RELAY_QUEUE = asyncio.Queue()
@@ -771,6 +838,35 @@ class StorageDB:
                     PRIMARY KEY (intent_id, instruction_id)
                 )
                 """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS blind_commitments (
+                    commitment_id TEXT PRIMARY KEY,
+                    intent_id TEXT,
+                    maker_client_id TEXT,
+                    blind_pair_hash TEXT,
+                    blind_side_hash TEXT,
+                    blind_amount_hash TEXT,
+                    blind_slot_tokens_json TEXT,
+                    expiration INTEGER,
+                    created_at INTEGER
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_blind_commitments_pair ON blind_commitments(blind_pair_hash)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_blind_commitments_exp ON blind_commitments(expiration)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS dht_intent_index (
+                    key TEXT,
+                    commitment_id TEXT,
+                    holder_node_id TEXT,
+                    holder_ip TEXT,
+                    holder_port INTEGER,
+                    expires_at INTEGER,
+                    created_at INTEGER,
+                    PRIMARY KEY (key, commitment_id, holder_node_id)
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dht_intent_key ON dht_intent_index(key)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dht_intent_expires ON dht_intent_index(expires_at)")
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS matches (
                     match_id TEXT PRIMARY KEY,
@@ -1041,6 +1137,35 @@ class StorageDB:
                     PRIMARY KEY (intent_id, instruction_id)
                 )
                 """)
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS blind_commitments (
+                    commitment_id TEXT PRIMARY KEY,
+                    intent_id TEXT,
+                    maker_client_id TEXT,
+                    blind_pair_hash TEXT,
+                    blind_side_hash TEXT,
+                    blind_amount_hash TEXT,
+                    blind_slot_tokens_json TEXT,
+                    expiration BIGINT,
+                    created_at BIGINT
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_blind_commitments_pair ON blind_commitments(blind_pair_hash)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_blind_commitments_exp ON blind_commitments(expiration)")
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS dht_intent_index (
+                    key TEXT,
+                    commitment_id TEXT,
+                    holder_node_id TEXT,
+                    holder_ip TEXT,
+                    holder_port INTEGER,
+                    expires_at BIGINT,
+                    created_at BIGINT,
+                    PRIMARY KEY (key, commitment_id, holder_node_id)
+                )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dht_intent_key ON dht_intent_index(key)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_dht_intent_expires ON dht_intent_index(expires_at)")
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS matches (
                     match_id TEXT PRIMARY KEY,
@@ -1781,6 +1906,106 @@ class StorageDB:
                          ON CONFLICT (intent_id, instruction_id)
                          DO UPDATE SET manifest_id=EXCLUDED.manifest_id, created_at=EXCLUDED.created_at""",
                       (intent_id, instruction_id, manifest_id, created_at))
+
+    def dht_intent_store(self, key: str, commitment_id: str, holder_node_id: str,
+                         holder_ip: str, holder_port: int, expires_at: int):
+        created_at = int(time.time() * 1000)
+        payload = (key, commitment_id, holder_node_id, holder_ip, int(holder_port), int(expires_at), created_at)
+        self._execute("""INSERT OR REPLACE INTO dht_intent_index
+                         (key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at, created_at)
+                         VALUES (?,?,?,?,?,?,?)"""
+                      if self.backend == 'sqlite'
+                      else """INSERT INTO dht_intent_index
+                         (key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at, created_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s)
+                         ON CONFLICT (key, commitment_id, holder_node_id)
+                         DO UPDATE SET holder_ip=EXCLUDED.holder_ip, holder_port=EXCLUDED.holder_port,
+                                       expires_at=EXCLUDED.expires_at, created_at=EXCLUDED.created_at""",
+                      payload)
+
+    def dht_intent_find(self, key: str, limit: int = 50) -> List[Dict[str, Any]]:
+        now_ms = int(time.time() * 1000)
+        cur = self._execute("""SELECT key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at, created_at
+                               FROM dht_intent_index WHERE key=? AND expires_at>=? ORDER BY created_at DESC LIMIT ?"""
+                            if self.backend == 'sqlite'
+                            else """SELECT key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at, created_at
+                               FROM dht_intent_index WHERE key=%s AND expires_at>=%s ORDER BY created_at DESC LIMIT %s""",
+                            (key, now_ms, limit))
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                'key': row[0], 'commitment_id': row[1], 'holder_node_id': row[2],
+                'holder_ip': row[3], 'holder_port': row[4], 'expires_at': row[5], 'created_at': row[6]
+            })
+        return out
+
+    def dht_intent_cleanup(self) -> int:
+        now_ms = int(time.time() * 1000)
+        cur = self._execute("""DELETE FROM dht_intent_index WHERE expires_at<?"""
+                            if self.backend == 'sqlite'
+                            else """DELETE FROM dht_intent_index WHERE expires_at<%s""",
+                            (now_ms,))
+        try:
+            return cur.rowcount
+        except Exception:
+            return 0
+
+    def upsert_blind_commitment(self, payload: Dict[str, Any], commitment_id: str):
+        if not payload or not commitment_id:
+            return
+        created_at = int(time.time() * 1000)
+        data = (
+            commitment_id,
+            str(payload.get('intent_id', '') or ''),
+            str(payload.get('maker_client_id', '') or ''),
+            str(payload.get('blind_pair_hash', '') or ''),
+            str(payload.get('blind_side_hash', '') or ''),
+            str(payload.get('blind_amount_hash', '') or ''),
+            json.dumps(payload.get('blind_slot_tokens') or []),
+            int(payload.get('expiration', 0) or 0),
+            created_at
+        )
+        self._execute("""INSERT OR REPLACE INTO blind_commitments
+                         (commitment_id, intent_id, maker_client_id, blind_pair_hash, blind_side_hash,
+                          blind_amount_hash, blind_slot_tokens_json, expiration, created_at)
+                         VALUES (?,?,?,?,?,?,?,?,?)"""
+                      if self.backend == 'sqlite'
+                      else """INSERT INTO blind_commitments
+                         (commitment_id, intent_id, maker_client_id, blind_pair_hash, blind_side_hash,
+                          blind_amount_hash, blind_slot_tokens_json, expiration, created_at)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         ON CONFLICT (commitment_id)
+                         DO UPDATE SET intent_id=EXCLUDED.intent_id, maker_client_id=EXCLUDED.maker_client_id,
+                                       blind_pair_hash=EXCLUDED.blind_pair_hash, blind_side_hash=EXCLUDED.blind_side_hash,
+                                       blind_amount_hash=EXCLUDED.blind_amount_hash,
+                                       blind_slot_tokens_json=EXCLUDED.blind_slot_tokens_json,
+                                       expiration=EXCLUDED.expiration, created_at=EXCLUDED.created_at""",
+                      data)
+
+    def list_blind_commitments(self) -> List[Dict[str, Any]]:
+        now_ms = int(time.time() * 1000)
+        cur = self._execute("""SELECT commitment_id, intent_id, maker_client_id, blind_pair_hash, blind_side_hash,
+                                      blind_amount_hash, blind_slot_tokens_json, expiration, created_at
+                               FROM blind_commitments WHERE expiration=0 OR expiration>=?"""
+                            if self.backend == 'sqlite'
+                            else """SELECT commitment_id, intent_id, maker_client_id, blind_pair_hash, blind_side_hash,
+                                      blind_amount_hash, blind_slot_tokens_json, expiration, created_at
+                               FROM blind_commitments WHERE expiration=0 OR expiration>=%s""",
+                            (now_ms,))
+        out = []
+        for row in cur.fetchall():
+            out.append({
+                'commitment_id': row[0],
+                'intent_id': row[1],
+                'maker_client_id': row[2],
+                'blind_pair_hash': row[3],
+                'blind_side_hash': row[4],
+                'blind_amount_hash': row[5],
+                'blind_slot_tokens': json.loads(row[6]) if row[6] else [],
+                'expiration': row[7],
+                'created_at': row[8]
+            })
+        return out
 
     def create_match(self, match: Dict[str, Any]):
         now_ms = int(time.time() * 1000)
@@ -3598,7 +3823,92 @@ def _broadcast_blind_commitment(intent: Dict[str, Any], request_id: str = '') ->
         },
         request_id=request_id
     )
+    _persist_blind_commitment_payload(payload_obj, instruction_id)
+    if DHT_INTENT_ENABLED:
+        try:
+            slot_tokens = payload_obj.get('blind_slot_tokens') or []
+            amount_hash = str(payload_obj.get('blind_amount_hash', '')).strip()
+            side_hash = str(payload_obj.get('blind_side_hash', '')).strip()
+            expires_at = int(payload_obj.get('expiration', 0))
+            for token in slot_tokens:
+                key = _dht_intent_key(str(token), amount_hash, side_hash)
+                run_async(dht_intent_store_async(
+                    key=key,
+                    commitment_id=instruction_id,
+                    holder_node_id=node_id or '',
+                    holder_ip='',
+                    holder_port=NODE_PORT,
+                    expires_at=expires_at
+                ))
+        except Exception:
+            pass
     return instruction_id
+
+async def _dht_discover_intent_candidates_async(intent: Dict[str, Any], request_id: str = '') -> int:
+    if not DHT_INTENT_ENABLED or not BLIND_MATCHING_ENABLED or not BLIND_MATCHING_AVAILABLE:
+        return 0
+    commitment_meta = intent.get('commitment_meta') if isinstance(intent.get('commitment_meta'), dict) else {}
+    slot_tokens = commitment_meta.get('blind_slot_tokens') or []
+    amount_hash = str(commitment_meta.get('blind_amount_hash', '')).strip()
+    side_hash = str(commitment_meta.get('blind_side_hash', '')).strip()
+    if not slot_tokens or not amount_hash or not side_hash:
+        return 0
+    discovered = 0
+    seen_commitments = set()
+    for token in slot_tokens:
+        key = _dht_intent_key(str(token), amount_hash, side_hash)
+        records = await dht_intent_find_async(key, ttl=DHT_INTENT_QUERY_TTL, max_results=50)
+        for record in records:
+            commitment_id = str(record.get('commitment_id', '')).strip()
+            holder_node_id = str(record.get('holder_node_id', '')).strip()
+            holder_ip = str(record.get('holder_ip', '')).strip()
+            holder_port = int(record.get('holder_port', NODE_PORT) or NODE_PORT)
+            expires_at = int(record.get('expires_at', 0))
+            if not commitment_id or commitment_id in seen_commitments:
+                continue
+            seen_commitments.add(commitment_id)
+            dht_intent_store_local(key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at)
+            if holder_node_id and holder_ip:
+                await _dht_verify_and_add({
+                    'node_id': holder_node_id,
+                    'ip': holder_ip,
+                    'node_port': holder_port,
+                    'capabilities': [],
+                    'region': '',
+                    'served_destinations': []
+                })
+            if commitment_id and not get_manifest_record(commitment_id):
+                if not holder_ip:
+                    continue
+                try:
+                    resp = await send_to_node_async(
+                        holder_ip,
+                        {'cmd': CMD_FETCH_MANIFEST, 'instruction_id': commitment_id},
+                        port=holder_port
+                    )
+                    if resp:
+                        payload = json.loads(resp.decode())
+                        if payload.get('status') == 'OK' and payload.get('manifest'):
+                            store_manifest_record(commitment_id, payload['manifest'])
+                            await collect_shards_dynamically_async(commitment_id, max_attempts=6, poll_interval=1.0)
+                            try:
+                                reconstructed = reconstruct_with_quorum(commitment_id)
+                                if reconstructed:
+                                    _persist_blind_commitment_payload(reconstructed, commitment_id)
+                            except Exception:
+                                pass
+                            discovered += 1
+                except Exception:
+                    continue
+    if discovered:
+        append_audit_event(
+            'dht_intent_discovery',
+            intent.get('maker_client_id', ''),
+            intent.get('intent_id', ''),
+            details={'discovered': discovered},
+            request_id=request_id
+        )
+    return discovered
 
 def _refresh_intent_expiry_state(intent: Dict[str, Any]):
     if intent.get('status') in (INTENT_STATUS_OPEN, INTENT_STATUS_PARTIAL) and _is_intent_expired(intent):
@@ -3627,6 +3937,8 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
         return matches
 
     candidates_with_overlap: List[Dict[str, Any]] = []
+    blind_candidates = STORAGE_DB.list_blind_commitments() if DHT_INTENT_ENABLED else []
+    blind_hint_count = 0
     for other in candidates:
         if not other:
             continue
@@ -3650,6 +3962,43 @@ def _run_private_matching(new_intent: Dict[str, Any], request_id: str = '') -> L
             'overlap': overlap,
             'blind_overlap': blind_overlap
         })
+
+    if blind_candidates and BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE:
+        new_meta = new_intent.get('commitment_meta') if isinstance(new_intent.get('commitment_meta'), dict) else {}
+        for item in blind_candidates:
+            if not item:
+                continue
+            if item.get('maker_client_id') == new_intent.get('maker_client_id'):
+                continue
+            if item.get('intent_id') == new_intent.get('intent_id'):
+                continue
+            candidate_meta = _blind_commitment_meta_from_payload(item)
+            overlap_tokens = blind_overlap_tokens(new_meta, candidate_meta)
+            if not overlap_tokens:
+                continue
+            # If we already have the full intent locally, include it as a real candidate.
+            linked_intent = STORAGE_DB.get_trade_intent(item.get('intent_id', '') or '')
+            if linked_intent:
+                overlap = _compute_overlap(new_intent, linked_intent)
+                if overlap and overlap.get('amount', 0) > 0:
+                    candidates_with_overlap.append({
+                        'intent': linked_intent,
+                        'overlap': overlap,
+                        'blind_overlap': overlap_tokens
+                    })
+                continue
+            blind_hint_count += 1
+            append_audit_event(
+                'blind_candidate_detected',
+                new_intent.get('maker_client_id', ''),
+                new_intent.get('intent_id', ''),
+                details={
+                    'commitment_id': item.get('commitment_id', ''),
+                    'counterparty_client_id': item.get('maker_client_id', ''),
+                    'overlap_tokens': len(overlap_tokens),
+                },
+                request_id=request_id
+            )
 
     if not candidates_with_overlap:
         return matches
@@ -3890,6 +4239,11 @@ def create_trade_intent(client: Dict[str, Any], data: Dict[str, Any], request_id
         details={'instruction_id': private_instruction_id},
         request_id=request_id
     )
+    if DHT_INTENT_ENABLED:
+        try:
+            run_async(_dht_discover_intent_candidates_async(intent, request_id=request_id))
+        except Exception:
+            pass
     matched = _run_private_matching(intent, request_id=request_id)
     intent['matches_detected'] = [m['match_id'] for m in matched]
     return intent
@@ -5370,6 +5724,295 @@ async def listen_broadcast_async():
         except Exception:
             await asyncio.sleep(0.1)
 
+def _hash_node_id(value: str) -> int:
+    if not value:
+        return 0
+    return int(sha256(value.encode()).hexdigest(), 16)
+
+def _xor_distance(a: str, b: str) -> int:
+    return _hash_node_id(a) ^ _hash_node_id(b)
+
+def _dht_prune_seen():
+    now = time.time()
+    with dht_seen_lock:
+        stale = [qid for qid, ts in dht_seen_queries.items() if now - ts > DHT_SEEN_TTL_SECONDS]
+        for qid in stale:
+            dht_seen_queries.pop(qid, None)
+
+def _dht_mark_seen(query_id: str) -> bool:
+    _dht_prune_seen()
+    with dht_seen_lock:
+        if query_id in dht_seen_queries:
+            return False
+        dht_seen_queries[query_id] = time.time()
+        return True
+
+def _dht_intent_prune_seen():
+    now = time.time()
+    with dht_intent_seen_lock:
+        stale = [qid for qid, ts in dht_intent_seen_queries.items() if now - ts > DHT_INTENT_SEEN_TTL_SECONDS]
+        for qid in stale:
+            dht_intent_seen_queries.pop(qid, None)
+
+def _dht_intent_mark_seen(query_id: str) -> bool:
+    _dht_intent_prune_seen()
+    with dht_intent_seen_lock:
+        if query_id in dht_intent_seen_queries:
+            return False
+        dht_intent_seen_queries[query_id] = time.time()
+        return True
+
+def _dht_intent_key(slot_token: str, amount_hash: str, side_hash: str) -> str:
+    key_seed = f"{slot_token}|{amount_hash}|{side_hash}"
+    return sha256(key_seed.encode()).hexdigest()
+
+def _blind_commitment_meta_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'blind_slot_tokens': list(payload.get('blind_slot_tokens') or []),
+        'blind_pair_hash': str(payload.get('blind_pair_hash', '')).strip(),
+        'blind_side_hash': str(payload.get('blind_side_hash', '')).strip()
+    }
+
+def _persist_blind_commitment_payload(payload: Dict[str, Any], commitment_id: str):
+    if not isinstance(payload, dict):
+        return
+    if str(payload.get('kind', '')).strip() != 'trade_intent_blind_commitment':
+        return
+    try:
+        STORAGE_DB.upsert_blind_commitment(payload, commitment_id)
+    except Exception:
+        pass
+
+def closest_neighbors(target_id: str, k: int, exclude_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    exclude = set(exclude_ids or [])
+    with neighbors_lock:
+        items = [(nid, info) for nid, info in neighbors.items() if nid and nid not in exclude]
+    if not items:
+        return []
+    ranked = sorted(items, key=lambda item: _xor_distance(target_id, item[0]))
+    return [
+        {'node_id': nid, **info}
+        for nid, info in ranked[:max(1, k)]
+    ]
+
+def _neighbor_to_dht_node(nid: str, info: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'node_id': nid,
+        'ip': info.get('ip', ''),
+        'node_port': info.get('node_port', NODE_PORT),
+        'capabilities': info.get('capabilities', []),
+        'region': info.get('region', ''),
+        'served_destinations': info.get('served_destinations', []),
+        'node_signing_pub': info.get('signing_pub', '')
+    }
+
+def _merge_dht_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for n in nodes:
+        nid = (n or {}).get('node_id', '')
+        if not nid:
+            continue
+        if nid not in merged:
+            merged[nid] = n
+    return list(merged.values())
+
+async def _dht_forward_query(peer: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        resp = await asyncio.wait_for(
+            send_to_node_async(peer['ip'], payload, port=peer.get('node_port', NODE_PORT)),
+            timeout=max(1.0, DHT_QUERY_TIMEOUT_SECONDS)
+        )
+        if not resp:
+            return []
+        data = json.loads(resp.decode())
+        if data.get('status') != 'OK':
+            return []
+        return data.get('nodes', []) or []
+    except Exception:
+        return []
+
+async def dht_query_async(target_id: str, ttl: Optional[int] = None,
+                          max_results: Optional[int] = None) -> List[Dict[str, Any]]:
+    if not DHT_ENABLED:
+        return []
+    if not target_id:
+        return []
+    ttl = DHT_QUERY_TTL if ttl is None else max(0, int(ttl))
+    max_results = DHT_MAX_RESULTS if max_results is None else max(1, int(max_results))
+    query_id = str(uuid.uuid4())
+    visited = [node_id] if node_id else []
+    base_candidates = closest_neighbors(target_id, DHT_FANOUT, exclude_ids=visited)
+    payload = {
+        'cmd': CMD_DHT_QUERY,
+        'query_id': query_id,
+        'origin_id': node_id or '',
+        'target_id': target_id,
+        'ttl': ttl,
+        'visited': visited,
+        'max_results': max_results
+    }
+    tasks = [
+        _dht_forward_query(peer, payload)
+        for peer in base_candidates
+        if peer.get('ip')
+    ]
+    results: List[Dict[str, Any]] = []
+    if tasks:
+        for res in await asyncio.gather(*tasks, return_exceptions=False):
+            results.extend(res)
+    results.extend([_neighbor_to_dht_node(n['node_id'], n) for n in base_candidates if n.get('node_id')])
+    return _merge_dht_nodes(results)[:max_results]
+
+async def _dht_verify_and_add(node: Dict[str, Any]) -> bool:
+    nid = (node or {}).get('node_id', '')
+    ip = (node or {}).get('ip', '')
+    port = int((node or {}).get('node_port') or NODE_PORT)
+    if not nid or not ip:
+        return False
+    msg = {
+        'cmd': CMD_HANDSHAKE,
+        'node_id': node_id,
+        'node_port': NODE_PORT,
+        'capabilities': ['storage', 'reconstruction', 'routing', 'otc_v1'],
+        'version': '2.0',
+        'transport_mode': TRANSPORT_MODE,
+        'region': CONFIG.get('region', ''),
+        'country_code': CONFIG.get('country_code', ''),
+        'served_destinations': SERVED_DESTINATIONS,
+        'node_signing_pub': get_node_signing_public()
+    }
+    try:
+        resp = await asyncio.wait_for(send_to_node_async(ip, msg, port=port), timeout=max(1.0, DHT_QUERY_TIMEOUT_SECONDS))
+        if not resp or resp != b'OK':
+            return False
+    except Exception:
+        return False
+    with neighbors_lock:
+        neighbors[nid] = {
+            'ip': ip,
+            'node_port': port,
+            'capabilities': node.get('capabilities', []),
+            'version': node.get('version', '0.0'),
+            'transport_mode': node.get('transport_mode', TRANSPORT_MODE),
+            'region': node.get('region', ''),
+            'country_code': node.get('country_code', ''),
+            'served_destinations': node.get('served_destinations', []),
+            'last_seen': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'last_seen_ts': time.time(),
+            'signing_pub': node.get('node_signing_pub', '')
+        }
+    return True
+
+async def dht_refresh_async():
+    while True:
+        try:
+            if not DHT_ENABLED:
+                await asyncio.sleep(5)
+                continue
+            targets = [str(uuid.uuid4())]
+            if node_id:
+                targets.append(node_id)
+            for target in targets:
+                nodes = await dht_query_async(target, ttl=DHT_QUERY_TTL, max_results=DHT_MAX_RESULTS)
+                for n in nodes:
+                    try:
+                        await _dht_verify_and_add(n)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        await asyncio.sleep(max(5, DHT_REFRESH_INTERVAL_SECONDS))
+
+def dht_intent_store_local(key: str, commitment_id: str, holder_node_id: str,
+                           holder_ip: str, holder_port: int, expires_at: int):
+    try:
+        STORAGE_DB.dht_intent_store(key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at)
+    except Exception:
+        pass
+
+async def dht_intent_store_async(key: str, commitment_id: str, holder_node_id: str,
+                                 holder_ip: str, holder_port: int, expires_at: int):
+    if not DHT_INTENT_ENABLED:
+        return
+    dht_intent_store_local(key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at)
+    targets = closest_neighbors(key, max(1, DHT_INTENT_REPLICATION_K))
+    msg = {
+        'cmd': CMD_DHT_STORE_INTENT,
+        'key': key,
+        'commitment_id': commitment_id,
+        'holder_node_id': holder_node_id,
+        'holder_ip': holder_ip or '',
+        'holder_port': int(holder_port),
+        'expires_at': int(expires_at)
+    }
+    tasks = []
+    for peer in targets:
+        if peer.get('ip'):
+            tasks.append(send_to_node_async(peer['ip'], msg, port=peer.get('node_port', NODE_PORT)))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+async def _dht_intent_forward_query(peer: Dict[str, Any], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        resp = await asyncio.wait_for(
+            send_to_node_async(peer['ip'], payload, port=peer.get('node_port', NODE_PORT)),
+            timeout=max(1.0, DHT_INTENT_QUERY_TIMEOUT_SECONDS)
+        )
+        if not resp:
+            return []
+        data = json.loads(resp.decode())
+        if data.get('status') != 'OK':
+            return []
+        return data.get('records', []) or []
+    except Exception:
+        return []
+
+async def dht_intent_find_async(key: str, ttl: Optional[int] = None,
+                                max_results: Optional[int] = None) -> List[Dict[str, Any]]:
+    if not DHT_INTENT_ENABLED:
+        return []
+    if not key:
+        return []
+    ttl = DHT_INTENT_QUERY_TTL if ttl is None else max(0, int(ttl))
+    max_results = 50 if max_results is None else max(1, int(max_results))
+    query_id = str(uuid.uuid4())
+    visited = [node_id] if node_id else []
+    base_candidates = closest_neighbors(key, DHT_INTENT_FANOUT, exclude_ids=visited)
+    payload = {
+        'cmd': CMD_DHT_FIND_INTENT,
+        'query_id': query_id,
+        'origin_id': node_id or '',
+        'key': key,
+        'ttl': ttl,
+        'visited': visited,
+        'max_results': max_results
+    }
+    tasks = [
+        _dht_intent_forward_query(peer, payload)
+        for peer in base_candidates
+        if peer.get('ip')
+    ]
+    results: List[Dict[str, Any]] = []
+    if tasks:
+        for res in await asyncio.gather(*tasks, return_exceptions=False):
+            results.extend(res)
+    results.extend(STORAGE_DB.dht_intent_find(key, limit=max_results))
+    unique = {}
+    for r in results:
+        rid = f"{r.get('commitment_id','')}::{r.get('holder_node_id','')}"
+        if rid not in unique:
+            unique[rid] = r
+    return list(unique.values())[:max_results]
+
+async def dht_intent_cleanup_async():
+    while True:
+        try:
+            if DHT_INTENT_ENABLED:
+                STORAGE_DB.dht_intent_cleanup()
+        except Exception:
+            pass
+        await asyncio.sleep(max(5, DHT_INTENT_CLEANUP_INTERVAL_SECONDS))
+
 def _parse_seed_nodes() -> List[Dict[str, Any]]:
     seeds = []
     for item in SEED_NODES:
@@ -5744,6 +6387,16 @@ async def handle_client_async(reader: asyncio.StreamReader, writer: asyncio.Stre
                     msg = P2PHealth.model_validate(msg).model_dump()
                 elif msg.get('cmd') == CMD_HANDSHAKE:
                     msg = P2PHandshake.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_DHT_QUERY:
+                    msg = P2PDHTQuery.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_DHT_RESPONSE:
+                    msg = P2PDHTResponse.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_DHT_STORE_INTENT:
+                    msg = P2PDHTIntentStore.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_DHT_FIND_INTENT:
+                    msg = P2PDHTIntentFind.model_validate(msg).model_dump()
+                elif msg.get('cmd') == CMD_DHT_INTENT_RESPONSE:
+                    msg = P2PDHTIntentResponse.model_validate(msg).model_dump()
             except ValidationError:
                 writer.write(json.dumps({'status': 'BAD_REQUEST'}).encode())
                 await writer.drain()
@@ -5872,6 +6525,129 @@ async def handle_client_async(reader: asyncio.StreamReader, writer: asyncio.Stre
             })
             writer.write(response.encode())
             await writer.drain()
+
+        elif cmd == CMD_DHT_QUERY:
+            try:
+                query_id = msg.get('query_id', '')
+                if not query_id or not _dht_mark_seen(query_id):
+                    response = json.dumps({'status': 'DUPLICATE', 'query_id': query_id, 'nodes': []})
+                    writer.write(response.encode())
+                    await writer.drain()
+                    return
+                target_id = msg.get('target_id', '')
+                ttl = int(msg.get('ttl', 0))
+                visited = msg.get('visited', []) or []
+                max_results = int(msg.get('max_results', DHT_MAX_RESULTS))
+
+                visited_ids = set(visited)
+                if node_id:
+                    visited_ids.add(node_id)
+                local_candidates = closest_neighbors(target_id, max_results, exclude_ids=list(visited_ids))
+                local_nodes = [_neighbor_to_dht_node(n['node_id'], n) for n in local_candidates if n.get('node_id')]
+                results = list(local_nodes)
+
+                if ttl > 0:
+                    forward_peers = closest_neighbors(target_id, DHT_FANOUT, exclude_ids=list(visited_ids))
+                    next_visited = list(visited_ids)
+                    payload = {
+                        'cmd': CMD_DHT_QUERY,
+                        'query_id': query_id,
+                        'origin_id': msg.get('origin_id', ''),
+                        'target_id': target_id,
+                        'ttl': ttl - 1,
+                        'visited': next_visited,
+                        'max_results': max_results
+                    }
+                    tasks = [
+                        _dht_forward_query(peer, payload)
+                        for peer in forward_peers
+                        if peer.get('ip')
+                    ]
+                    if tasks:
+                        for res in await asyncio.gather(*tasks, return_exceptions=False):
+                            results.extend(res)
+
+                results = _merge_dht_nodes(results)[:max_results]
+                response = json.dumps({'status': 'OK', 'query_id': query_id, 'nodes': results})
+                writer.write(response.encode())
+                await writer.drain()
+            except Exception:
+                response = json.dumps({'status': 'ERROR', 'query_id': msg.get('query_id', ''), 'nodes': []})
+                writer.write(response.encode())
+                await writer.drain()
+
+        elif cmd == CMD_DHT_STORE_INTENT:
+            try:
+                key = msg.get('key', '')
+                commitment_id = msg.get('commitment_id', '')
+                holder_node_id = msg.get('holder_node_id', '')
+                holder_ip = msg.get('holder_ip', '') or ''
+                holder_port = int(msg.get('holder_port', NODE_PORT))
+                expires_at = int(msg.get('expires_at', 0))
+                if not holder_ip:
+                    peername = writer.get_extra_info('peername')
+                    holder_ip = peername[0] if peername else ''
+                if key and commitment_id and holder_node_id and expires_at:
+                    dht_intent_store_local(key, commitment_id, holder_node_id, holder_ip, holder_port, expires_at)
+                    writer.write(b'OK')
+                else:
+                    writer.write(json.dumps({'status': 'BAD_REQUEST'}).encode())
+                await writer.drain()
+            except Exception:
+                writer.write(json.dumps({'status': 'ERROR'}).encode())
+                await writer.drain()
+
+        elif cmd == CMD_DHT_FIND_INTENT:
+            try:
+                query_id = msg.get('query_id', '')
+                if not query_id or not _dht_intent_mark_seen(query_id):
+                    response = json.dumps({'status': 'DUPLICATE', 'query_id': query_id, 'records': []})
+                    writer.write(response.encode())
+                    await writer.drain()
+                    return
+                key = msg.get('key', '')
+                ttl = int(msg.get('ttl', 0))
+                visited = msg.get('visited', []) or []
+                max_results = int(msg.get('max_results', 50))
+
+                visited_ids = set(visited)
+                if node_id:
+                    visited_ids.add(node_id)
+                local_records = STORAGE_DB.dht_intent_find(key, limit=max_results)
+                results = list(local_records)
+
+                if ttl > 0:
+                    forward_peers = closest_neighbors(key, DHT_INTENT_FANOUT, exclude_ids=list(visited_ids))
+                    next_visited = list(visited_ids)
+                    payload = {
+                        'cmd': CMD_DHT_FIND_INTENT,
+                        'query_id': query_id,
+                        'origin_id': msg.get('origin_id', ''),
+                        'key': key,
+                        'ttl': ttl - 1,
+                        'visited': next_visited,
+                        'max_results': max_results
+                    }
+                    tasks = [
+                        _dht_intent_forward_query(peer, payload)
+                        for peer in forward_peers
+                        if peer.get('ip')
+                    ]
+                    if tasks:
+                        for res in await asyncio.gather(*tasks, return_exceptions=False):
+                            results.extend(res)
+                unique = {}
+                for r in results:
+                    rid = f"{r.get('commitment_id','')}::{r.get('holder_node_id','')}"
+                    if rid not in unique:
+                        unique[rid] = r
+                response = json.dumps({'status': 'OK', 'query_id': query_id, 'records': list(unique.values())[:max_results]})
+                writer.write(response.encode())
+                await writer.drain()
+            except Exception:
+                response = json.dumps({'status': 'ERROR', 'query_id': msg.get('query_id', ''), 'records': []})
+                writer.write(response.encode())
+                await writer.drain()
             
         else:
             writer.write(json.dumps({'status': 'UNKNOWN_CMD'}).encode())
@@ -8059,6 +8835,12 @@ if __name__ == '__main__':
             asyncio.create_task(onchain_reconciler_async()),
             asyncio.create_task(swap_timeout_sweeper_async())
         ]
+        if DHT_ENABLED:
+            tasks.append(asyncio.create_task(dht_refresh_async()))
+            print('[INIT] DHT discovery enabled')
+        if DHT_INTENT_ENABLED:
+            tasks.append(asyncio.create_task(dht_intent_cleanup_async()))
+            print('[INIT] DHT intent index enabled')
         if LOCAL_TEST_MODE:
             tasks.append(asyncio.create_task(local_test_discovery_async()))
             print('[INIT] Local test discovery: localhost probing enabled')
