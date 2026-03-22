@@ -1,6 +1,6 @@
 <!-- Copyright (c) 2026 Eduardo de Figueiredo. SPDX-License-Identifier: BUSL-1.1 -->
 
-# ONESEAM Intent Dark Pool
+# ONESEAM Intent Dark Pool — trade your BTC without sowing your hands
 
 ONESEAM is an **intent dark-pool**: a **Bitcoin-native** non-custodial P2P coordination network for:
 - private order discovery
