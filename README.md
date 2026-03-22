@@ -86,6 +86,7 @@ The desktop app bundles the Python backend as a native binary, so end users do *
 ### Windows Installer (ready)
 - Installer location: `releases/ONESEAM_1.0.0_x64-setup.exe`
 - This is a click-to-install `.exe` for end users.
+- SHA256: `BF45FE4DEB8DFA30361BDB3EE34BBAEDEC1C42DB79A3DCE7E5AC8EBE214EFA67`
 
 ### Build on Windows (for maintainers)
 ```bash
