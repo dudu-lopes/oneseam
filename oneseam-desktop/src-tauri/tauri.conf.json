@@ -25,6 +25,7 @@
     "icon": ["icons/icon.ico"],
     "resources": [
       "backend/oneseam_backend.exe",
+      "backend/oneseam_blind_matching.py",
       "backend/oneseam_config.yaml",
       "backend/shard_signing_pub.pem"
     ]
