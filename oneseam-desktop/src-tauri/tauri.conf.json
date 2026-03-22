@@ -1,0 +1,32 @@
+{
+  "productName": "ONESEAM",
+  "version": "1.0.0",
+  "identifier": "com.oneseam.desktop",
+  "build": {
+    "frontendDist": "../src",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "node ../dev-server.js"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ONESEAM",
+        "width": 420,
+        "height": 720,
+        "resizable": false,
+        "decorations": true,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": [
+      "backend/oneseam_backend.exe",
+      "backend/oneseam_config.yaml",
+      "backend/shard_signing_pub.pem"
+    ]
+  }
+}

@@ -78,7 +78,30 @@ This preserves dark-pool privacy while improving discovery across the network.
 - Set `legacy_otc_api_enabled: false`.
 - Use TLS/mTLS and JWT-only auth (`allow_legacy_api_keys: false`).
 - Never commit private keys, tokens, or production certificates.
- - `batch_allow_partial: true` enables partial fills when full liquidity is not available.
+- `batch_allow_partial: true` enables partial fills when full liquidity is not available.
+
+## Desktop App (Tauri)
+The desktop app bundles the Python backend as a native binary, so end users do **not** need Python or Node.
+
+### Windows Installer (ready)
+- Installer location: `releases/ONESEAM_1.0.0_x64-setup.exe`
+- This is a click-to-install `.exe` for end users.
+
+### Build on Windows (for maintainers)
+```bash
+cd oneseam-desktop
+npm install
+npm run build
+```
+
+### Build on macOS (for maintainers)
+```bash
+cd oneseam-desktop
+npm install
+npm run build
+```
+The `.dmg` output will be under:
+`oneseam-desktop/src-tauri/target/release/bundle/dmg/`
 
 ## License
 ONESEAM is source-available software released under the Business Source License 1.1 (BSL 1.1).

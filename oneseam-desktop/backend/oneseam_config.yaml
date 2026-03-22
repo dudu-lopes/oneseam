@@ -1,0 +1,185 @@
+# Copyright (c) 2026 Eduardo de Figueiredo.
+# SPDX-License-Identifier: BUSL-1.1
+
+# ONESEAM DarkPool Configuration
+# Version: 3.0
+
+# Node settings
+node_port: 5001
+broadcast_port: 5002
+api_port: 8000
+api_bind: "127.0.0.1"
+storage_dir: oneseam_storage
+db_backend: "sqlite"   # sqlite | postgres
+db_path: "oneseam.db"
+db_dsn: ""             # postgres DSN if backend=postgres
+
+# Quorum: k-of-n shards required for reconstruction
+quorum_k: 2
+quorum_n: 3
+
+# Transport mode: ON_GRID | OFF_GRID | HYBRID
+# - ON_GRID: Traditional internet
+# - OFF_GRID: Mesh networks (BATMAN, OLSR)
+# - HYBRID: Both
+transport_mode: HYBRID
+
+# Optional routing hints
+region: ""
+country_code: ""
+
+# Blind Relay (Repasse Cego)
+blind_relay_enabled: true
+max_relay_hops: 10
+served_destinations: []  # ex: [BANK_ALPHA, BANK_BETA]
+blind_relay_flood: false  # Flood to all neighbors for max resilience
+
+# Bootstrap / NAT
+seed_nodes: []  # ex: ["1.2.3.4:5001", "seed.example.com:5001"]
+upnp_enabled: false
+
+# Local test (single machine, multi-terminal)
+local_test_port_scan_size: 20
+local_test_discovery_interval: 2.0
+local_test_registry_dir: ".oneseam_local"
+local_test_registry_ttl_seconds: 90
+
+# Security (REST API)
+tls_enabled: false
+tls_cert_path: ""
+tls_key_path: ""
+mtls_ca_path: ""
+mtls_allowed_cns: []  # Optional allowlist of client CNs
+
+jwt_issuer: ""
+jwt_audience: ""
+jwt_public_keys: []  # List of PEM strings or file paths
+jwt_algorithms: ["RS256", "ES256"]
+allow_legacy_api_keys: true
+api_max_payload_bytes: 1048576
+rate_limit_rps: 5
+rate_limit_burst: 10
+idempotency_ttl_seconds: 300
+idempotency_max_entries: 10000
+
+# Security (P2P)
+p2p_tls_enabled: false
+p2p_tls_cert_path: ""
+p2p_tls_key_path: ""
+p2p_mtls_ca_path: ""
+p2p_mtls_allowed_cns: []
+p2p_mtls_required: true
+p2p_retries: 3
+p2p_backoff_base: 0.2
+
+# Shard signing
+shard_signature_required: true
+shard_signing_private_key: "shard_signing_priv.pem"
+shard_signing_public_key: "shard_signing_pub.pem"
+trusted_node_pubkeys: {}  # {NODE_ID: "-----BEGIN PUBLIC KEY-----..."}
+
+# Key management
+key_store_path: "oneseam_keys.json"
+signing_key_id: "node_signing"
+
+# DarkPool v2 (primary API/CLI)
+darkpool_enabled: true
+production_mode: false
+intent_bucket_size_price: 100.0
+intent_bucket_size_amount: 0.1
+batch_matching_enabled: true
+batch_min_participants: 2
+batch_max_participants: 8
+batch_allow_partial: true
+batch_secret_key_id: "batch_secret"
+blind_matching_enabled: true
+blind_price_slot_size: 100.0
+blind_max_price_slots: 2048
+blind_global_salt: "ONESEAM_BLIND_MATCHING_V1_PRICE_SLOTS"
+blind_commitment_destination: "blind_orderbook"
+session_handshake_ttl_seconds: 600
+htlc_chain_a: "BTC"
+htlc_chain_b: "LIGHTNING"
+htlc_min_confirmations: 1
+htlc_timeout_lock_a_seconds: 7200
+htlc_timeout_lock_b_seconds: 3600
+swap_timeout_sweep_interval_seconds: 5
+swap_enforce_side_proofs: true
+wallet_attestation_required: true
+proof_wallet_attestation_required: true
+proof_server_side_verification_required: false
+proof_verifier_url: ""
+proof_verifier_auth_token: ""
+proof_verifier_timeout_seconds: 8
+btc_rpc_url: ""
+btc_rpc_user: ""
+btc_rpc_password: ""
+btc_rpc_timeout_seconds: 8
+intent_min_expiration_seconds: 30
+intent_max_expiration_seconds: 86400
+intent_max_notional: 10000000
+fee_bps: 1  # 0.01%
+fee_lightning_endpoint: ""
+counterparty_allowlist: {} # optional: {TRADER_A: [TRADER_B, TRADER_C]}
+
+# Legacy OTC v1 transition switch (deprecated surface)
+# Keep disabled for clean dark-pool-first deployments.
+legacy_otc_api_enabled: false
+
+# OTC legacy domain (deprecated, kept during dual API transition)
+otc_enabled: true
+wallet_binding_required: false
+allowed_base_assets: ["BTC", "ETH", "SOL"]
+allowed_quote_assets: ["USDT", "USDC", "USD"]
+otc_default_fee_bps: 20
+otc_max_trade_notional: 10000000
+
+# Legacy EVM escrow integration (disabled by default).
+# Keep empty unless legacy OTC endpoints are intentionally enabled.
+evm_rpc_url: ""
+evm_chain_id: 11155111
+escrow_contract_address: ""
+escrow_contract_abi_path: ""
+escrow_contract_name: "OTCEscrow"
+escrow_contract_version: "1.0.0"
+escrow_confirmations_required: 1
+escrow_verify_on_submit: true
+escrow_prepare_ttl_seconds: 600
+escrow_event_strict_validation: true
+escrow_reconcile_interval_seconds: 20
+
+# Optional token metadata (legacy OTC prepare payload helper)
+otc_assets:
+  BTC:
+    decimals: 8
+  ETH:
+    decimals: 18
+  USDT:
+    decimals: 6
+  USDC:
+    decimals: 6
+
+# Observability
+log_file: ""         # empty = stdout
+log_json: true
+log_level: "INFO"    # DEBUG | INFO | WARN | ERROR
+neighbor_ttl_seconds: 60
+metrics_enabled: true
+
+# DHT discovery (peer discovery only)
+dht_enabled: true
+dht_query_ttl: 3
+dht_fanout: 3
+dht_max_results: 20
+dht_query_timeout_seconds: 4
+dht_seen_ttl_seconds: 60
+dht_refresh_interval_seconds: 30
+
+# DHT intent discovery (blind slot indexing)
+dht_intent_enabled: true
+dht_intent_replication_k: 3
+dht_intent_query_ttl: 3
+dht_intent_fanout: 3
+dht_intent_query_timeout_seconds: 4
+dht_intent_seen_ttl_seconds: 60
+dht_intent_cleanup_interval_seconds: 30

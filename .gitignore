@@ -50,3 +50,14 @@ secrets/*
 
 # Local production overrides
 config/*.local.yaml
+
+# Desktop build artifacts
+oneseam-desktop/node_modules/
+oneseam-desktop/src-tauri/target/
+oneseam-desktop/backend/build/
+oneseam-desktop/backend/dist/
+oneseam-desktop/backend/oneseam_backend.spec
+oneseam-desktop/src-tauri/backend/build/
+oneseam-desktop/src-tauri/backend/dist/
+oneseam-desktop/src-tauri/backend/oneseam_backend.spec
+oneseam-desktop/src-tauri/gen/

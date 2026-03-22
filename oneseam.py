@@ -2711,6 +2711,17 @@ def _sign_message_with_env_wallet(message_text: str, wallet_hint: str = '') -> s
     signed = Account.sign_message(encode_defunct(text=message_text), private_key=key)
     return '0x' + signed.signature.hex()
 
+def _env_wallet_address() -> str:
+    raw_key = (os.environ.get('ONESEAM_WALLET_PRIVATE_KEY', '') or '').strip()
+    if not raw_key or not EVM_SIGNATURE_AVAILABLE:
+        return ''
+    key = raw_key if raw_key.startswith('0x') else f'0x{raw_key}'
+    try:
+        account = Account.from_key(key)
+    except Exception:
+        return ''
+    return _normalize_wallet(account.address)
+
 def _build_trade_intent_attestation_payload(client: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
     metadata_hash = sha256(_canonical_json(data.get('metadata') or {}).encode('utf-8')).hexdigest()
     private_terms_hash = sha256(_canonical_json(data.get('private_terms') or {}).encode('utf-8')).hexdigest()
@@ -2731,6 +2742,9 @@ def _build_trade_intent_attestation_payload(client: Dict[str, Any], data: Dict[s
 
 def prepare_trade_intent_signature(client: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
     payload = _build_trade_intent_attestation_payload(client, data)
+    env_wallet = _env_wallet_address()
+    if env_wallet and payload.get('maker_wallet') in ('', 'local_user'):
+        payload['maker_wallet'] = env_wallet
     message_text = _canonical_json(payload)
     return {
         'wallet': payload['maker_wallet'],
@@ -8049,7 +8063,7 @@ async def start_rest_api():
         if isinstance(scopes, str):
             scopes = scopes.split()
         roles = client.get('roles', [])
-        if required_scopes:
+        if required_scopes and '*' not in scopes:
             for s in required_scopes:
                 if s not in scopes:
                     metric_inc('auth_failed_total')
@@ -8530,6 +8544,19 @@ async def start_rest_api():
             idempotency_put(request['client']['client_id'], idem_key, payload, 201)
         return web.json_response(payload, status=201)
 
+    async def list_trade_intents_api(request):
+        await ensure_auth(request, required_scopes=['intent:read'], required_roles=['issuer', 'receiver', 'auditor', 'admin'])
+        if not DARKPOOL_ENABLED:
+            return json_error(request, 503, 'darkpool_disabled', 'darkpool_disabled')
+        client_id = (request.query.get('client_id') or request['client']['client_id'] or '').strip()
+        if not client_id:
+            return json_error(request, 400, 'client_id_required', 'client_id_required')
+        roles = request['client'].get('roles') or []
+        if 'admin' not in roles and client_id != request['client'].get('client_id'):
+            return json_error(request, 403, 'actor_not_allowed_for_intent', 'actor_not_allowed_for_intent')
+        intents = STORAGE_DB.list_trade_intents_for_client(client_id, limit=200)
+        return web.json_response({'intents': intents, 'request_id': request['request_id']})
+
     async def prepare_trade_intent_signature_api(request):
         await ensure_auth(request, required_scopes=['intent:write'], required_roles=['issuer', 'receiver', 'admin'])
         if not DARKPOOL_ENABLED:
@@ -8547,7 +8574,14 @@ async def start_rest_api():
             prepared = prepare_trade_intent_signature(request['client'], data)
         except Exception as e:
             return _map_otc_error(request, e)
-        return web.json_response({'attestation': prepared, 'request_id': request['request_id']})
+        auto_signature = ''
+        try:
+            auto_signature = _sign_message_with_env_wallet(prepared.get('message', ''), prepared.get('wallet', ''))
+        except Exception:
+            auto_signature = ''
+        if auto_signature:
+            prepared['wallet_signature'] = auto_signature
+        return web.json_response({'attestation': prepared, 'wallet_signature': auto_signature, 'request_id': request['request_id']})
 
     async def get_trade_intent_api(request):
         await ensure_auth(request, required_scopes=['intent:read'], required_roles=['issuer', 'receiver', 'auditor', 'admin'])
@@ -8588,6 +8622,37 @@ async def start_rest_api():
         except Exception as e:
             return _map_otc_error(request, e)
         return web.json_response({'match': match_obj, 'request_id': request['request_id']})
+
+    async def list_matches_api(request):
+        await ensure_auth(request, required_scopes=['match:read'], required_roles=['issuer', 'receiver', 'auditor', 'admin'])
+        if not DARKPOOL_ENABLED:
+            return json_error(request, 503, 'darkpool_disabled', 'darkpool_disabled')
+        client_id = (request.query.get('client_id') or request['client']['client_id'] or '').strip()
+        if not client_id:
+            return json_error(request, 400, 'client_id_required', 'client_id_required')
+        roles = request['client'].get('roles') or []
+        if 'admin' not in roles and client_id != request['client'].get('client_id'):
+            return json_error(request, 403, 'actor_not_allowed_for_match', 'actor_not_allowed_for_match')
+        matches = STORAGE_DB.list_matches_for_client(client_id, limit=200)
+        return web.json_response({'matches': matches, 'request_id': request['request_id']})
+
+    async def node_status_api(request):
+        await ensure_auth(request, required_scopes=None, required_roles=None)
+        with neighbors_lock:
+            peers_connected = len(neighbors)
+        status_obj = {
+            'status': 'online',
+            'transport': TRANSPORT_MODE,
+            'peers_connected': peers_connected,
+            'dht_peers': peers_connected if DHT_ENABLED else 0,
+            'blind_matching': bool(BLIND_MATCHING_ENABLED and BLIND_MATCHING_AVAILABLE),
+            'batch_partial_fills': bool(BATCH_ALLOW_PARTIAL),
+            'settlement': f"{HTLC_CHAIN_A} + {HTLC_CHAIN_B}",
+            'custody': 'none',
+            'fee': f"{FEE_BPS/100:.2f}%",
+            'request_id': request['request_id']
+        }
+        return web.json_response(status_obj)
 
     async def open_session_api(request):
         await ensure_auth(request, required_scopes=['session:write'], required_roles=['issuer', 'receiver', 'admin'])
@@ -8768,8 +8833,10 @@ async def start_rest_api():
         routes.extend([
             web.post('/v2/intents/prepare-signature', prepare_trade_intent_signature_api),
             web.post('/v2/intents', create_trade_intent_api),
+            web.get('/v2/intents', list_trade_intents_api),
             web.get('/v2/intents/{intent_id}', get_trade_intent_api),
             web.post('/v2/intents/{intent_id}/cancel', cancel_trade_intent_api),
+            web.get('/v2/matches', list_matches_api),
             web.get('/v2/matches/{match_id}', get_match_api),
             web.post('/v2/matches/{match_id}/session/open', open_session_api),
             web.post('/v2/matches/{match_id}/swap/start', start_swap_api),
@@ -8778,6 +8845,7 @@ async def start_rest_api():
             web.get('/v2/swaps/{swap_id}', get_swap_api),
             web.post('/v2/swaps/{swap_id}/fee/invoice', issue_fee_invoice_api),
             web.post('/v2/swaps/{swap_id}/fee/confirm', confirm_fee_invoice_api),
+            web.get('/v2/node/status', node_status_api),
         ])
     app.add_routes(routes)
 

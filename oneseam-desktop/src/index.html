@@ -1,0 +1,144 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ONESEAM — Desktop</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="os-wrap">
+  <div class="screen-tabs" id="tabs">
+    <div class="screen-tab active" onclick="switchScreen('home', this)">home</div>
+    <div class="screen-tab" onclick="switchScreen('post', this)">post order</div>
+    <div class="screen-tab" onclick="switchScreen('orders', this)">my orders</div>
+    <div class="screen-tab" onclick="switchScreen('node', this)">node status</div>
+  </div>
+
+  <div class="os-phone">
+    <div class="screen active" id="screen-home">
+      <div class="os-topbar">
+        <span class="os-logo">ONESEAM</span>
+        <div class="os-dot" id="home-dot"></div>
+      </div>
+      <div class="os-body">
+        <div class="os-tagline">Trade BTC<br><span>without showing</span><br>your hand.</div>
+        <div class="os-sub">No middleman. No leaks.<br>No custody. Bitcoin-native.</div>
+        <div class="os-menu">
+          <div class="os-item" onclick="switchScreen('post', document.querySelectorAll('.screen-tab')[1])">
+            <span class="os-item-num">1.</span>
+            <span class="os-item-text">Post Order</span>
+            <span class="os-item-arrow">›</span>
+          </div>
+          <div class="os-item" onclick="switchScreen('orders', document.querySelectorAll('.screen-tab')[2])">
+            <span class="os-item-num">2.</span>
+            <span class="os-item-text">My Orders</span>
+            <span class="os-item-arrow">›</span>
+          </div>
+          <div class="os-item" onclick="switchScreen('node', document.querySelectorAll('.screen-tab')[3])">
+            <span class="os-item-num">0.</span>
+            <span class="os-item-text">Node Status</span>
+            <span class="os-item-arrow">›</span>
+          </div>
+        </div>
+        <div style="margin-top: auto;">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <span class="os-badge os-badge-green">non-custodial</span>
+            <span class="os-badge os-badge-yellow">batch fills</span>
+            <span class="os-badge os-badge-gray">DHT discovery</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-post">
+      <div class="os-topbar">
+        <span class="os-logo">POST ORDER</span>
+        <span class="os-badge os-badge-gray">blind intent</span>
+      </div>
+      <div class="os-body">
+        <div class="os-field">
+          <label class="os-field-label">You sell</label>
+          <input class="os-input" value="BTC" readonly />
+        </div>
+        <div class="os-field">
+          <label class="os-field-label">You receive</label>
+          <input class="os-input" value="USDT" readonly />
+        </div>
+        <div class="os-field">
+          <label class="os-field-label">Amount (BTC)</label>
+          <input id="amount-input" class="os-input" type="number" placeholder="0.00" />
+        </div>
+        <div class="os-row">
+          <div class="os-field">
+            <label class="os-field-label">Min price</label>
+            <input id="min-price-input" class="os-input" placeholder="95000" />
+          </div>
+          <div class="os-field">
+            <label class="os-field-label">Max price</label>
+            <input id="max-price-input" class="os-input" placeholder="97000" />
+          </div>
+        </div>
+        <div class="os-field">
+          <label class="os-field-label">Validity</label>
+          <select id="validity-select" class="os-input" style="appearance:none;">
+            <option value="900">15 minutes</option>
+            <option value="3600">1 hour</option>
+            <option value="86400">24 hours</option>
+          </select>
+        </div>
+        <div style="padding:10px 12px;background:var(--os-surface);border-radius:10px;border:1px solid var(--os-border);">
+          <div style="font-size:10px;color:var(--os-muted);line-height:1.6;">Your price range is never revealed. A blind commitment is published to the DHT. Only compatible counterparties can detect overlap.</div>
+        </div>
+        <div id="post-error" class="os-error" style="display:none;"></div>
+        <button id="submit-intent" class="os-btn os-btn-primary">SUBMIT INTENT</button>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-orders">
+      <div class="os-topbar">
+        <span class="os-logo">MY ORDERS</span>
+        <span class="os-badge os-badge-green" id="match-count-badge">0 matches</span>
+      </div>
+      <div class="os-body" id="orders-body">
+        <div>
+          <div style="font-size:10px;color:var(--os-muted);margin-bottom:10px;letter-spacing:0.05em;text-transform:uppercase;">Active matches</div>
+          <div id="active-matches"></div>
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--os-muted);margin-bottom:10px;letter-spacing:0.05em;text-transform:uppercase;">Open intents</div>
+          <div id="open-intents"></div>
+        </div>
+      </div>
+      <div class="os-nav">
+        <button id="reveal-action" class="os-reveal-btn" disabled style="opacity:0.4;cursor:not-allowed;">WAITING FOR ALL LOCKS</button>
+      </div>
+    </div>
+
+    <div class="screen" id="screen-node">
+      <div class="os-topbar">
+        <span class="os-logo">NODE STATUS</span>
+        <div class="os-dot" id="node-dot"></div>
+      </div>
+      <div class="os-body">
+        <div>
+          <div class="os-node-row"><span class="os-node-key">status</span><span class="os-node-val" id="node-status">offline</span></div>
+          <div class="os-node-row"><span class="os-node-key">transport</span><span class="os-node-val" id="node-transport">-</span></div>
+          <div class="os-node-row"><span class="os-node-key">peers connected</span><span class="os-node-val" id="node-peers">-</span></div>
+          <div class="os-node-row"><span class="os-node-key">DHT peers</span><span class="os-node-val" id="node-dht">-</span></div>
+          <div class="os-node-row"><span class="os-node-key">blind matching</span><span class="os-node-val" id="node-blind">-</span></div>
+          <div class="os-node-row"><span class="os-node-key">batch partial fills</span><span class="os-node-val" id="node-batch">-</span></div>
+          <div class="os-node-row"><span class="os-node-key">settlement</span><span class="os-node-val" id="node-settlement">-</span></div>
+          <div class="os-node-row"><span class="os-node-key">custody</span><span class="os-node-val" id="node-custody">-</span></div>
+          <div class="os-node-row" style="border:none;"><span class="os-node-key">fee</span><span class="os-node-val" id="node-fee">-</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="os-label">tap the tabs to explore each screen</div>
+</div>
+
+<script src="main.js"></script>
+</body>
+</html>
