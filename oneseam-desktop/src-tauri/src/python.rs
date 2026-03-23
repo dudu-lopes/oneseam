@@ -55,6 +55,16 @@ fn open_backend_log(app: &AppHandle) -> Result<std::fs::File, String> {
         .map_err(|e| format!("log_open_failed: {}", e))
 }
 
+
+fn kill_existing_backend() {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/IM", "oneseam_backend.exe"])
+            .status();
+    }
+}
+
 fn wait_for_health() -> Result<(), String> {
     let start = Instant::now();
     let client = reqwest::blocking::Client::new();
@@ -70,6 +80,8 @@ fn wait_for_health() -> Result<(), String> {
 }
 
 pub fn start_backend(app: &AppHandle) -> Result<Child, String> {
+    kill_existing_backend();
+    sleep(Duration::from_secs(1));
     let backend_dir = resolve_backend_dir(app)?;
     let requirements = backend_dir.join("requirements.txt");
     let backend_script = backend_dir.join("oneseam.py");
