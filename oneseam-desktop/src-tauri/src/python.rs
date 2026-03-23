@@ -6,6 +6,9 @@
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 const HEALTH_URL: &str = "http://localhost:8000/health";
@@ -127,6 +130,11 @@ pub fn start_backend(app: &AppHandle) -> Result<Child, String> {
         cmd.env("ONESEAM_WALLET_PRIVATE_KEY", DEFAULT_WALLET_PRIVATE_KEY);
     }
     cmd.env("ONESEAM_LOCAL_TEST", "0");
+
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000);
+    }
 
     let child = cmd.spawn().map_err(|e| format!("spawn_failed: {}", e))?;
     wait_for_health()?;

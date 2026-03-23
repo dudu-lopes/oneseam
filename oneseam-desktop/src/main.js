@@ -45,12 +45,10 @@ async function apiPost(path, body) {
   return data;
 }
 
-function switchScreen(id, tabEl) {
+function switchScreen(id) {
   state.active = id;
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('.screen-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('screen-' + id).classList.add('active');
-  if (tabEl) tabEl.classList.add('active');
 
   if (id === 'orders') {
     startOrdersPolling();
@@ -117,7 +115,7 @@ async function submitIntent() {
     const created = await apiPost('/v2/intents', submitPayload);
     const intentId = created.trade_intent && created.trade_intent.intent_id;
     if (intentId) {
-      switchScreen('orders', document.querySelectorAll('.screen-tab')[2]);
+      switchScreen('orders');
     }
   } catch (err) {
     setPostError(err.message || 'Failed to submit intent.');

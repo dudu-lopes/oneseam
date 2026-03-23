@@ -8,12 +8,6 @@
 </head>
 <body>
 <div class="os-wrap">
-  <div class="screen-tabs" id="tabs">
-    <div class="screen-tab active" onclick="switchScreen('home', this)">home</div>
-    <div class="screen-tab" onclick="switchScreen('post', this)">post order</div>
-    <div class="screen-tab" onclick="switchScreen('orders', this)">my orders</div>
-    <div class="screen-tab" onclick="switchScreen('node', this)">node status</div>
-  </div>
 
   <div class="os-phone">
     <div class="screen active" id="screen-home">
@@ -25,17 +19,17 @@
         <div class="os-tagline">Trade BTC<br><span>without showing</span><br>your hand.</div>
         <div class="os-sub">No middleman. No leaks.<br>No custody. Bitcoin-native.</div>
         <div class="os-menu">
-          <div class="os-item" onclick="switchScreen('post', document.querySelectorAll('.screen-tab')[1])">
+          <div class="os-item" onclick="switchScreen('post')">
             <span class="os-item-num">1.</span>
             <span class="os-item-text">Post Order</span>
             <span class="os-item-arrow">›</span>
           </div>
-          <div class="os-item" onclick="switchScreen('orders', document.querySelectorAll('.screen-tab')[2])">
+          <div class="os-item" onclick="switchScreen('orders')">
             <span class="os-item-num">2.</span>
             <span class="os-item-text">My Orders</span>
             <span class="os-item-arrow">›</span>
           </div>
-          <div class="os-item" onclick="switchScreen('node', document.querySelectorAll('.screen-tab')[3])">
+          <div class="os-item" onclick="switchScreen('node')">
             <span class="os-item-num">0.</span>
             <span class="os-item-text">Node Status</span>
             <span class="os-item-arrow">›</span>
@@ -136,7 +130,6 @@
     </div>
   </div>
 
-  <div class="os-label">tap the tabs to explore each screen</div>
 </div>
 
 <script src="main.js"></script>

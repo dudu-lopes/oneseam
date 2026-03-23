@@ -22,7 +22,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
+    "icon": ["icons/icon.svg", "icons/icon.ico"],
     "resources": [
       "backend/oneseam_backend.exe",
       "backend/oneseam_blind_matching.py",
