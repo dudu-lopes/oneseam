@@ -136,19 +136,21 @@ pub fn start_backend(app: &AppHandle) -> Result<Child, String> {
         cmd.creation_flags(0x08000000);
     }
 
+    sleep(Duration::from_secs(1));
+
     let child = cmd.spawn().map_err(|e| format!("spawn_failed: {}", e))?;
     wait_for_health()?;
     Ok(child)
 }
 
 pub fn stop_backend(child: &mut Child) {
-    let _ = child.try_wait();
-    let wait_until = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < wait_until {
-        if let Ok(Some(_)) = child.try_wait() {
-            return;
-        }
-        sleep(Duration::from_millis(200));
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/F", "/T"])
+            .status();
     }
+
     let _ = child.kill();
+    let _ = child.try_wait();
 }
