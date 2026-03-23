@@ -1,4 +1,5 @@
 ﻿use std::{
+    fs::{self, OpenOptions},
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread::sleep,
@@ -18,16 +19,37 @@ fn resolve_backend_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Ok(path) = app.path().resolve("backend", BaseDirectory::Resource) {
         candidates.push(path);
     }
+    if let Ok(path) = app.path().resolve("", BaseDirectory::Resource) {
+        candidates.push(path);
+    }
     if let Ok(path) = std::env::current_dir() {
         candidates.push(path.join("backend"));
+        candidates.push(path.clone());
         candidates.push(path.join("..\\backend"));
     }
     for candidate in candidates {
-        if candidate.join("oneseam.py").exists() {
+        if candidate.join("oneseam_backend.exe").exists()
+            || candidate.join("oneseam_backend").exists()
+            || candidate.join("oneseam.py").exists()
+        {
             return Ok(candidate);
         }
     }
     Err("backend directory not found".to_string())
+}
+
+fn open_backend_log(app: &AppHandle) -> Result<std::fs::File, String> {
+    let log_dir = app
+        .path()
+        .resolve("logs", BaseDirectory::AppData)
+        .map_err(|e| format!("log_dir_resolve_failed: {}", e))?;
+    let _ = fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("oneseam-backend.log");
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("log_open_failed: {}", e))
 }
 
 fn wait_for_health() -> Result<(), String> {
@@ -55,13 +77,16 @@ pub fn start_backend(app: &AppHandle) -> Result<Child, String> {
     };
 
     let mut cmd;
+    let log_file = open_backend_log(app).ok();
+    let stdout_log = log_file.as_ref().and_then(|f| f.try_clone().ok());
+    let stderr_log = log_file.as_ref().and_then(|f| f.try_clone().ok());
     if backend_exe.exists() {
         cmd = Command::new(&backend_exe);
         cmd.arg("api")
             .current_dir(&backend_dir)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(stdout_log.map(Stdio::from).unwrap_or(Stdio::null()))
+            .stderr(stderr_log.map(Stdio::from).unwrap_or(Stdio::null()));
     } else {
         let python_check = Command::new("python")
             .arg("--version")
@@ -91,8 +116,8 @@ pub fn start_backend(app: &AppHandle) -> Result<Child, String> {
             .arg("api")
             .current_dir(&backend_dir)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(stdout_log.map(Stdio::from).unwrap_or(Stdio::null()))
+            .stderr(stderr_log.map(Stdio::from).unwrap_or(Stdio::null()));
     }
 
     if std::env::var("ONESEAM_API_KEYS_JSON").is_err() {
