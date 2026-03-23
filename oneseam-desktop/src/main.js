@@ -4,6 +4,7 @@ const DEFAULT_CLIENT_ID = 'local_user';
 
 const state = {
   active: 'home',
+  history: [],
   intents: [],
   matches: [],
   swaps: {},
@@ -45,10 +46,26 @@ async function apiPost(path, body) {
   return data;
 }
 
-function switchScreen(id) {
+function updateBackButtons() {
+  const hasHistory = state.history.length > 0;
+  document.querySelectorAll('.os-back').forEach(btn => {
+    if (hasHistory) {
+      btn.disabled = false;
+    } else {
+      btn.disabled = true;
+    }
+  });
+}
+
+function switchScreen(id, push = true) {
+  if (state.active === id) return;
+  if (push) {
+    state.history.push(state.active);
+  }
   state.active = id;
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById('screen-' + id).classList.add('active');
+  updateBackButtons();
 
   if (id === 'orders') {
     startOrdersPolling();
@@ -60,6 +77,14 @@ function switchScreen(id) {
   } else {
     stopNodePolling();
   }
+}
+
+function goBack() {
+  if (!state.history.length) {
+    return;
+  }
+  const prev = state.history.pop();
+  switchScreen(prev, false);
 }
 
 function setPostError(message) {
@@ -364,4 +389,7 @@ function stopNodePolling() {
 
 document.getElementById('submit-intent').addEventListener('click', submitIntent);
 
+updateBackButtons();
+
 window.switchScreen = switchScreen;
+window.goBack = goBack;

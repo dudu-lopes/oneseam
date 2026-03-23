@@ -12,7 +12,10 @@
   <div class="os-phone">
     <div class="screen active" id="screen-home">
       <div class="os-topbar">
-        <span class="os-logo">ONESEAM</span>
+        <div class="os-top-left">
+          <button class="os-back" onclick="goBack()" disabled>←</button>
+          <span class="os-logo">ONESEAM</span>
+        </div>
         <div class="os-dot" id="home-dot"></div>
       </div>
       <div class="os-body">
@@ -47,7 +50,10 @@
 
     <div class="screen" id="screen-post">
       <div class="os-topbar">
-        <span class="os-logo">POST ORDER</span>
+        <div class="os-top-left">
+          <button class="os-back" onclick="goBack()">←</button>
+          <span class="os-logo">POST ORDER</span>
+        </div>
         <span class="os-badge os-badge-gray">blind intent</span>
       </div>
       <div class="os-body">
@@ -91,7 +97,10 @@
 
     <div class="screen" id="screen-orders">
       <div class="os-topbar">
-        <span class="os-logo">MY ORDERS</span>
+        <div class="os-top-left">
+          <button class="os-back" onclick="goBack()">←</button>
+          <span class="os-logo">MY ORDERS</span>
+        </div>
         <span class="os-badge os-badge-green" id="match-count-badge">0 matches</span>
       </div>
       <div class="os-body" id="orders-body">
@@ -111,7 +120,10 @@
 
     <div class="screen" id="screen-node">
       <div class="os-topbar">
-        <span class="os-logo">NODE STATUS</span>
+        <div class="os-top-left">
+          <button class="os-back" onclick="goBack()">←</button>
+          <span class="os-logo">NODE STATUS</span>
+        </div>
         <div class="os-dot" id="node-dot"></div>
       </div>
       <div class="os-body">

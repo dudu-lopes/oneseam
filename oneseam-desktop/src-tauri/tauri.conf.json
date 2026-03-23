@@ -11,8 +11,8 @@
     "windows": [
       {
         "title": "ONESEAM",
-        "width": 520,
-        "height": 860,
+        "width": 480,
+        "height": 780,
         "resizable": false,
         "decorations": true,
         "center": true
