@@ -58,12 +58,19 @@
       </div>
       <div class="os-body">
         <div class="os-field">
+          <label class="os-field-label">Side</label>
+          <select id="side-select" class="os-input" style="appearance:none;">
+            <option value="sell">Sell BTC for USDT</option>
+            <option value="buy">Buy BTC with USDT</option>
+          </select>
+        </div>
+        <div class="os-field">
           <label class="os-field-label">You sell</label>
-          <input class="os-input" value="BTC" readonly />
+          <input id="sell-asset" class="os-input" value="BTC" readonly />
         </div>
         <div class="os-field">
           <label class="os-field-label">You receive</label>
-          <input class="os-input" value="USDT" readonly />
+          <input id="buy-asset" class="os-input" value="USDT" readonly />
         </div>
         <div class="os-field">
           <label class="os-field-label">Amount (BTC)</label>

@@ -105,10 +105,26 @@ function setSubmitLoading(isLoading) {
   btn.style.opacity = isLoading ? '0.7' : '1';
 }
 
+function updateSideAssets() {
+  const side = document.getElementById('side-select').value;
+  const sellAsset = document.getElementById('sell-asset');
+  const buyAsset = document.getElementById('buy-asset');
+  if (side === 'buy') {
+    sellAsset.value = 'USDT';
+    buyAsset.value = 'BTC';
+  } else {
+    sellAsset.value = 'BTC';
+    buyAsset.value = 'USDT';
+  }
+}
+
 async function submitIntent() {
   setPostError('');
   setSubmitLoading(true);
   try {
+    const side = document.getElementById('side-select').value;
+    const sellAsset = side === 'buy' ? 'USDT' : 'BTC';
+    const buyAsset = side === 'buy' ? 'BTC' : 'USDT';
     const amount = parseFloat(document.getElementById('amount-input').value);
     const priceMin = parseFloat(document.getElementById('min-price-input').value);
     const priceMax = parseFloat(document.getElementById('max-price-input').value);
@@ -119,8 +135,8 @@ async function submitIntent() {
     const expiration = Date.now() + (validity * 1000);
     const payload = {
       maker_wallet: 'local_user',
-      sell_asset: 'BTC',
-      buy_asset: 'USDT',
+      sell_asset: sellAsset,
+      buy_asset: buyAsset,
       amount: amount,
       price_min: priceMin,
       price_max: priceMax,
@@ -388,8 +404,10 @@ function stopNodePolling() {
 }
 
 document.getElementById('submit-intent').addEventListener('click', submitIntent);
+document.getElementById('side-select').addEventListener('change', updateSideAssets);
 
 updateBackButtons();
+updateSideAssets();
 
 window.switchScreen = switchScreen;
 window.goBack = goBack;
